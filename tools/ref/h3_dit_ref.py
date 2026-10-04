@@ -26,11 +26,14 @@ for t in r.tensors:
     shape = [int(x) for x in reversed(t.shape.tolist())]
     w = torch.from_numpy(gguf.quants.dequantize(t.data, t.tensor_type).astype(np.float32).reshape(shape))
     keep32 = any(t.name.startswith(p) for p in ("adaln_t_table", "rope.", "video_patch_proj", "audio_patch_proj",
-                                                 "final_layer.video_out", "final_layer.audio_out"))
+                                                 "final_layer.video_out", "final_layer.audio_out")) or ".adaln_proj." in t.name
     raw[t.name] = w if keep32 else w.to(torch.bfloat16)
 table = raw.pop("adaln_t_table")  # [grid, basis]
 raw.pop("rope.inv_freq")
 nb = sum(1 for k in raw if k.startswith("blocks.") and k.endswith("qkv_proj.weight"))
+if len(sys.argv) > 3:  # 只用前 N 層（除錯）
+    nb = int(sys.argv[3])
+    raw = {k: v for k, v in raw.items() if not k.startswith("blocks.") or int(k.split(".")[1]) < nb}
 H = 5376
 
 
@@ -82,11 +85,11 @@ class CurveEmbed(nn.Module):
 model.time_proj = nn.Identity()
 model.time_embedder = CurveEmbed(table)
 tm.MiniMaxH3AdaLayerNormModulation.forward = lambda self, temb: self.linear(
-    temb.to(self.linear.weight.dtype)).view(-1, 6 * self.hidden_size).chunk(6, dim=-1)
+    temb.to(self.linear.weight.dtype)).to(torch.bfloat16).view(-1, 6 * self.hidden_size).chunk(6, dim=-1)
 
 
 def out_forward(self, hs, temb, ti):
-    shift, scale = self.linear(temb.to(self.linear.weight.dtype)).chunk(2, dim=-1)
+    shift, scale = self.linear(temb.to(self.linear.weight.dtype)).to(torch.bfloat16).chunk(2, dim=-1)
     hs = self.norm(hs)
     return hs * (1.0 + scale.index_select(0, ti)) + shift.index_select(0, ti)
 
@@ -122,5 +125,5 @@ save_file({"txt": txt[0].contiguous(), "video": vrows.float().contiguous(), "aud
            "positions": pos.float().contiguous(), "v_video": v[0].float().contiguous(),
            "v_audio": a[0].float().contiguous()}, dst,
           metadata={"T": str(T), "F_lat": str(F_lat), "H": str(LH), "W": str(LW), "A": str(A),
-                    "tv": str(tv), "ta": str(ta)})
+                    "tv": str(tv), "ta": str(ta), "layers": str(nb)})
 print("saved", dst)

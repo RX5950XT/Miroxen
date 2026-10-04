@@ -30,7 +30,7 @@ std::vector<float> h3_sigmas(int steps, float shift) {
   return s;
 }
 
-H3Dit::H3Dit(const TensorStore& st, int device) : dw_(st, device) {
+H3Dit::H3Dit(const TensorStore& st, int device, int max_layers) : dw_(st, device) {
   MX_CHECK(st.has("blocks.0.attn.qkv_proj.weight"), "不是 MiniMax-H3 DiT 權重（缺 blocks.0.attn.qkv_proj）");
   MX_CHECK(st.has("adaln_t_table"),
            "目前只支援 pruned（adaln_t_table）版本的 MiniMax-H3 GGUF，例如 unsloth minimax_h3_fl2va_pruned-*.gguf");
@@ -68,6 +68,7 @@ H3Dit::H3Dit(const TensorStore& st, int device) : dw_(st, device) {
   int nr = 0, nb = 0;
   while (st.has("token_refiner.blocks." + std::to_string(nr) + ".attn.qkv_proj.weight")) nr++;
   while (st.has("blocks." + std::to_string(nb) + ".attn.qkv_proj.weight")) nb++;
+  if (max_layers > 0) nb = std::min(nb, max_layers);
   refiner_.reserve(nr);
   blocks_.reserve(nb);
   for (int i = 0; i < nr; i++) refiner_.push_back(load("token_refiner.blocks." + std::to_string(i) + ".", false));

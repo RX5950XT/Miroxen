@@ -31,7 +31,8 @@ struct H3Seq {
 
 class H3Dit {
  public:
-  H3Dit(const TensorStore& st, int device);
+  // max_layers：只載入前 N 層（除錯／數值比對用；0 = 全部）。
+  H3Dit(const TensorStore& st, int device, int max_layers = 0);
   int64_t dim() const { return dim_; }
   int64_t video_in() const { return video_in_.in; }  // 96 = 24×1×2×2
   int64_t audio_in() const { return audio_in_.in; }  // 32
