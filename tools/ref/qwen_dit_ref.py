@@ -68,7 +68,7 @@ def run(lat, t, mode):
             hidden_states=lat.to(dev, torch.bfloat16), encoder_hidden_states=txt.to(dev),
             timestep=torch.tensor([t], device=dev), img_shapes=shapes, img_mask=img_mask.to(dev),
             kv_cache=cache, kv_cache_mode=mode, return_dict=False,
-        )[0].float().cpu()
+        )[0][:, -N:].float().cpu()
 
 
 out1 = run(lat1, 0.7, "extract")
