@@ -150,7 +150,7 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
   int64_t seed = r.seed >= 0 ? r.seed : int64_t(std::random_device{}() & 0x7fffffff);
   std::vector<float> noise(N * C);
   {
-    std::mt19937_64 rng(uint64_t(seed));
+    std::mt19937_64 rng{uint64_t(seed)};
     std::normal_distribution<float> nd(0.f, 1.f);
     for (auto& v : noise) v = nd(rng);
   }

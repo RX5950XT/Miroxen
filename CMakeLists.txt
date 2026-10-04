@@ -21,7 +21,7 @@ if(MSVC)
                       $<$<COMPILE_LANGUAGE:CXX>:/W3> $<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
   add_compile_definitions(NOMINMAX _CRT_SECURE_NO_WARNINGS WIN32_LEAN_AND_MEAN)
 endif()
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr -lineinfo -Xcompiler=/utf-8")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --extended-lambda -lineinfo -Xcompiler=/utf-8")
 
 # 所有 src/ 下的程式碼（main.cpp 除外）組成核心靜態庫；新增檔案不需改這裡。
 file(GLOB_RECURSE MX_SRC CONFIGURE_DEPENDS src/*.cpp src/*.cu)
