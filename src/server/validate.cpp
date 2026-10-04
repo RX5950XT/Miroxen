@@ -142,17 +142,15 @@ void check_model(Engine& engine, const json& j, const std::string& type) {
   auto id = trim(j["model"].get<std::string>());
   bool matched = false;
   std::string kind;
-  bool loaded = false;
   for (const auto& m : engine.models()) {
     if (m.id != id) continue;
     matched = true;
     kind = m.kind;
-    loaded = m.loaded;
     break;
   }
   if (!matched) throw ApiError(400, "invalid_request_error", "model_not_found", "找不到模型");
   if (kind != type) throw ApiError(400, "invalid_request_error", "model_kind", "模型種類與此請求不符");
-  if (!loaded) throw ApiError(400, "invalid_request_error", "model_not_loaded", "模型尚未載入");
+  // 引擎按需載入模型（第一次請求會回報 "load" 階段），所以不檢查 loaded。
 }
 
 std::vector<LoraSpec> read_loras(const ServerOptions& opt, const json& j) {
