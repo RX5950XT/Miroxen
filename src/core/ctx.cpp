@@ -4,7 +4,9 @@ namespace mx {
 
 Ctx::Ctx(int dev, size_t act_bytes, size_t scratch_bytes) : device(dev) {
   MX_CUDA(cudaSetDevice(dev));
-  MX_CUDA(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+  // 必須是一般（阻塞）串流：程式各處用 cudaMemcpy（預設串流）讀回結果，
+  // 非阻塞串流不會和預設串流同步，會讀到尚未算完的資料（曾導致 H3 少算最後一步）。
+  MX_CUDA(cudaStreamCreate(&stream));
   MX_BLAS(cublasCreate(&blas));
   MX_BLAS(cublasSetStream(blas, stream));
   act = Arena(act_bytes, dev);

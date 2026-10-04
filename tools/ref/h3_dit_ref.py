@@ -121,6 +121,19 @@ if FP32:  # fp32 計算（權重仍是 bf16 儲存、使用時升精度），當
 
     tm.MiniMaxH3AdaLayerNormOut.forward = out_forward32
 
+DEV = "cuda" if os.environ.get("MX_REF_GPU") == "1" else "cpu"
+if DEV == "cuda":  # 權重留在 RAM，每個 transformer block 執行前搬上 GPU、執行後搬回（fp32 計算）
+    torch.backends.cuda.matmul.allow_tf32 = False
+    blocks = list(model.transformer_blocks) + list(model.token_refiner.refiner_blocks)
+    for blk in blocks:
+        blk.register_forward_pre_hook(lambda mod, args: (mod.to("cuda"), None)[1])  # 回傳 None：不改輸入
+        blk.register_forward_hook(lambda mod, args, out: (mod.to("cpu"), None)[1])
+    for name, mod in model.named_children():
+        if name not in ("transformer_blocks", "token_refiner"):
+            mod.to("cuda")
+    model.token_refiner.final_norm.to("cuda")
+    model.rope.inv_freq = model.rope.inv_freq.to("cuda")
+
 DUMP = os.environ.get("MX_REF_DUMP")
 if DUMP:
     # 用引擎存下的真實輸入（MX_H3_DUMP）跑完整取樣迴圈，比對第一步速度與最終 latent。
@@ -130,30 +143,51 @@ if DUMP:
     T, F_lat, LH, LW, A, steps = m["T"], m["F_lat"], m["H"], m["W"], m["A"], m["steps"]
     rd = lambda n, dt=np.float32: np.fromfile(os.path.join(DUMP, n), dtype=dt)
     txt = torch.from_numpy(rd("txt.bin", np.uint16).astype(np.int32)).to(torch.int16).view(torch.bfloat16)
-    txt = txt.reshape(1, T, -1).float()
-    vrows = torch.from_numpy(rd("video0.bin")).reshape(-1, 96)
-    arows = torch.from_numpy(rd("audio0.bin")).reshape(-1, 32)
+    txt = txt.reshape(1, T, -1).float().to(DEV)
+    vrows = torch.from_numpy(rd("video0.bin")).reshape(-1, 96).to(DEV)
+    arows = torch.from_numpy(rd("audio0.bin")).reshape(-1, 32).to(DEV)
     tags = torch.full((T,), 1, dtype=torch.long)
     pos, token_tags, vidx, aidx, tidx, ncv, nca = MiniMaxH3PrepareLayoutStep.build_packed_sequence(
         tags, F_lat, LH, LW, A, (1, 2, 2), 2, 2, 0)
+    pos, token_tags, vidx, aidx, tidx = (x.to(DEV) for x in (pos, token_tags, vidx, aidx, tidx))
     from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
     sv, sa = MiniMaxH3Scheduler(shift=12.0), MiniMaxH3Scheduler(shift=3.0)
-    sv.set_timesteps(steps); sa.set_timesteps(steps)
+    sv.set_timesteps(steps, device=DEV); sa.set_timesteps(steps, device=DEV)
     rel = lambda a, b: ((a - b).norm() / b.norm()).item()
+    FORCE = os.environ.get("MX_REF_FORCE")  # 例如 "1,5,10,20,28"：用引擎第 i 步的 latent 當輸入，比對速度
+    if FORCE:
+        for i in [int(x) for x in FORCE.split(",")]:
+            tv, ta = sv.timesteps[i], sa.timesteps[i]
+            xv = torch.from_numpy(rd(f"x{i}_video.bin")).reshape(-1, 96).to(DEV)
+            xa = torch.from_numpy(rd(f"x{i}_audio.bin")).reshape(-1, 32).to(DEV)
+            uniq, tind = MiniMaxH3SetTimestepsStep.build_row_timesteps(vidx.cpu(), aidx.cpu(), ncv, nca, T, float(tv),
+                                                                       float(ta), max(float(tv), 0.999), 1.0)
+            with torch.no_grad():
+                v, a = model(hidden_states=xv[None], audio_hidden_states=xa[None], encoder_hidden_states=txt,
+                             timestep=uniq.to(DEV), timestep_indices=tind.to(DEV), token_tags=token_tags,
+                             position_ids=pos, video_indices=vidx, audio_indices=aidx, text_indices=tidx,
+                             return_dict=False)
+            gv = torch.from_numpy(rd(f"v{i}_video.bin")).reshape(v[0].shape).to(DEV)
+            ga = torch.from_numpy(rd(f"v{i}_audio.bin")).reshape(a[0].shape).to(DEV)
+            print(f"forced step {i} tv={float(tv):.4f} ta={float(ta):.4f} uniq={uniq.tolist()} "
+                  f"rel err video {rel(gv, v[0].float()):.4f} audio {rel(ga, a[0].float()):.4f}", flush=True)
+        sys.exit(0)
     for i, (tv, ta) in enumerate(zip(sv.timesteps, sa.timesteps)):
-        uniq, tind = MiniMaxH3SetTimestepsStep.build_row_timesteps(vidx, aidx, ncv, nca, T, float(tv), float(ta),
-                                                                   max(float(tv), 0.999), 1.0)
+        uniq, tind = MiniMaxH3SetTimestepsStep.build_row_timesteps(vidx.cpu(), aidx.cpu(), ncv, nca, T, float(tv),
+                                                                   float(ta), max(float(tv), 0.999), 1.0)
+        uniq, tind = uniq.to(DEV), tind.to(DEV)
         with torch.no_grad():
             v, a = model(hidden_states=vrows[None], audio_hidden_states=arows[None], encoder_hidden_states=txt,
                          timestep=uniq, timestep_indices=tind, token_tags=token_tags, position_ids=pos,
                          video_indices=vidx, audio_indices=aidx, text_indices=tidx, return_dict=False)
         if i == 0:
-            gv = torch.from_numpy(rd("v0_video.bin")).reshape(v[0].shape)
-            ga = torch.from_numpy(rd("v0_audio.bin")).reshape(a[0].shape)
+            gv = torch.from_numpy(rd("v0_video.bin")).reshape(v[0].shape).to(DEV)
+            ga = torch.from_numpy(rd("v0_audio.bin")).reshape(a[0].shape).to(DEV)
             print(f"step0 rel err video {rel(gv, v[0].float()):.4f} audio {rel(ga, a[0].float()):.4f}", flush=True)
         vrows = sv.step(v[0].float(), tv, vrows, return_dict=False)[0]
         arows = sa.step(a[0].float(), ta, arows, return_dict=False)[0]
         print("step", i, "t", float(tv), flush=True)
+    vrows, arows = vrows.cpu(), arows.cpu()
     fv = torch.from_numpy(rd("video_final.bin")).reshape(vrows.shape)
     fa = torch.from_numpy(rd("audio_final.bin")).reshape(arows.shape)
     print(f"final rel err video {rel(fv, vrows):.4f} audio {rel(fa, arows):.4f}")

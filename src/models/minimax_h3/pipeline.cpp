@@ -171,6 +171,12 @@ VideoResult H3Pipeline::generate(const VideoRequest& r, const ProgressFn& cb, co
       dump_dev("v0_video.bin", vv.get(), vv.size());
       dump_dev("v0_audio.bin", va.get(), va.size());
     }
+    if (dump && std::getenv("MX_H3_DUMP_ALL")) {  // 每一步的輸入 latent 與速度
+      dump_dev(strf("x%d_video.bin", i).c_str(), dv.get(), dv.size());
+      dump_dev(strf("x%d_audio.bin", i).c_str(), da.get(), da.size());
+      dump_dev(strf("v%d_video.bin", i).c_str(), vv.get(), vv.size());
+      dump_dev(strf("v%d_audio.bin", i).c_str(), va.get(), va.size());
+    }
     axpy_f32(dv.as<float>(), vv.as<float>(), sv[i] - sv[i + 1], Nv * Cv, c.stream);
     axpy_f32(da.as<float>(), va.as<float>(), sa[i] - sa[i + 1], Na * Ca, c.stream);
   }
@@ -213,7 +219,7 @@ VideoResult H3Pipeline::generate(const VideoRequest& r, const ProgressFn& cb, co
       }
   std::string mp4 = stem + ".mp4";
   std::string cmd = strf("ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgb24 -s %lldx%lld -r 24 -i - -i \"%s.wav\" "
-                         "-c:v libx264 -pix_fmt yuv420p -crf 18 -c:a aac -b:a 192k -shortest \"%s\"",
+                         "-c:v libx264 -pix_fmt yuv420p -crf 18 -c:a aac -b:a 192k -af apad -shortest \"%s\"",
                          (long long)(W * 16), (long long)(H * 16), stem.c_str(), mp4.c_str());
 #ifdef _WIN32
   FILE* ff = _popen(cmd.c_str(), "wb");
