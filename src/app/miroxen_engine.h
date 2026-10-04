@@ -13,6 +13,9 @@ struct EngineConfig {
   // Qwen-Image-2.1（相對於 models_dir；空字串用預設）
   std::string qi_dit, qi_te, qi_vae, qi_tok;
   int qi_text_device = -1;  // -1 = 自動
+  // MiniMax-H3
+  std::string h3_dit, h3_te, h3_vvae, h3_avae, h3_tok;
+  std::string out_dir = "out";
 };
 
 std::unique_ptr<Engine> make_engine(const EngineConfig& cfg);

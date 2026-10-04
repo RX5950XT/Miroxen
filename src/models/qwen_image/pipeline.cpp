@@ -4,7 +4,7 @@
 #include <cmath>
 #include <random>
 
-#include "app/image_io.h"
+#include "server/image_io.h"
 #include "kernels/ops.h"
 
 namespace mx {
@@ -187,7 +187,7 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
   ImageResult res;
   res.width = int(W * 16);
   res.height = int(H * 16);
-  res.png = encode_png_rgba(rgba.data(), res.width, res.height);
+  res.png = encode_png(rgba.data(), res.width, res.height, 4);
   res.seed = seed;
   res.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   report("done", 1, 1);
