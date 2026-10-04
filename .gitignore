@@ -1,0 +1,8 @@
+/build*/
+/models/
+/out/
+*.gguf
+*.safetensors
+__pycache__/
+.vscode/
+.vs/
