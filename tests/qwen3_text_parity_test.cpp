@@ -32,30 +32,37 @@ int main() {
       std::printf("tokenizer 與參考一致：%s\n", same ? "PASS" : "FAIL");
       fails += !same;
     }
-    Qwen3TextEncoder te(st, 0);
-    Ctx c(0, size_t(512) << 20, te.scratch_bytes() * 2);
-    const int64_t n = int64_t(ids.size()), dim = te.dim();
-    DevBuf out(size_t(n) * dim * 2, 0);
-    te.encode(c, ids, out.as<bf16>());
-    std::vector<uint16_t> raw(n * dim);
-    MX_CUDA(cudaMemcpy(raw.data(), out.get(), raw.size() * 2, cudaMemcpyDeviceToHost));
-    std::vector<float> got(n * dim), expect(n * dim);
-    dequant_cpu(raw.data(), GType::BF16, n * dim, got.data());
-    const WeightRef& hr = rs.get("hidden");
-    dequant_cpu(hr.data, hr.type, hr.numel(), expect.data());
-    // 第 0 個 token（<|im_start|>）在 Qwen 的激活值極大，分開統計。
-    for (int part = 0; part < 2; part++) {
-      double num = 0, den = 0;
-      for (int64_t t = part ? 1 : 0; t < (part ? n : 1); t++)
-        for (int64_t i = 0; i < dim; i++) {
-          double d = got[t * dim + i] - expect[t * dim + i];
-          num += d * d;
-          den += double(expect[t * dim + i]) * expect[t * dim + i];
-        }
-      double re = std::sqrt(num / (den + 1e-30));
-      bool ok = re < 0.03;
-      fails += !ok;
-      std::printf("%s：相對誤差 %.4f → %s\n", part ? "token 1..n" : "token 0", re, ok ? "PASS" : "FAIL");
+    int ndev = 0;
+    MX_CUDA(cudaGetDeviceCount(&ndev));
+    // 兩種模式：常駐 GPU0、逐層串流（H3 32B 用的路徑）在最後一張卡。
+    for (int mode = 0; mode < 2; mode++) {
+    const int dev = mode ? ndev - 1 : 0;
+    std::printf("[%s @GPU%d]\n", mode ? "串流" : "常駐", dev);
+      Qwen3TextEncoder te(st, dev, mode == 1);
+      Ctx c(dev, size_t(512) << 20, te.scratch_bytes() * 2);
+      const int64_t n = int64_t(ids.size()), dim = te.dim();
+      DevBuf out(size_t(n) * dim * 2, dev);
+      te.encode(c, ids, out.as<bf16>());
+      std::vector<uint16_t> raw(n * dim);
+      MX_CUDA(cudaMemcpy(raw.data(), out.get(), raw.size() * 2, cudaMemcpyDeviceToHost));
+      std::vector<float> got(n * dim), expect(n * dim);
+      dequant_cpu(raw.data(), GType::BF16, n * dim, got.data());
+      const WeightRef& hr = rs.get("hidden");
+      dequant_cpu(hr.data, hr.type, hr.numel(), expect.data());
+      // 第 0 個 token（<|im_start|>）在 Qwen 的激活值極大，分開統計。
+      for (int part = 0; part < 2; part++) {
+        double num = 0, den = 0;
+        for (int64_t t = part ? 1 : 0; t < (part ? n : 1); t++)
+          for (int64_t i = 0; i < dim; i++) {
+            double d = got[t * dim + i] - expect[t * dim + i];
+            num += d * d;
+            den += double(expect[t * dim + i]) * expect[t * dim + i];
+          }
+        double re = std::sqrt(num / (den + 1e-30));
+        bool ok = re < 0.03;
+        fails += !ok;
+        std::printf("%s：相對誤差 %.4f → %s\n", part ? "token 1..n" : "token 0", re, ok ? "PASS" : "FAIL");
+      }
     }
     return fails ? 1 : 0;
   } catch (const std::exception& e) {
