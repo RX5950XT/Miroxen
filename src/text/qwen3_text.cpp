@@ -10,7 +10,8 @@
 
 namespace mx {
 
-Qwen3TextEncoder::Qwen3TextEncoder(const TensorStore& st, int device) : st_(st), dw_(st, device) {
+Qwen3TextEncoder::Qwen3TextEncoder(const TensorStore& st, int device, bool stream)
+    : st_(st), dw_(st, device) {
   std::string arch = st.meta_str("general.architecture", "qwen3vl");
   auto key = [&](const char* k) { return arch + "." + k; };
   int n_layers = int(st.meta_int(key("block_count"), 0));
@@ -27,16 +28,18 @@ Qwen3TextEncoder::Qwen3TextEncoder(const TensorStore& st, int device) : st_(st),
   MX_CHECK(present > 0 && dim_ > 0 && heads_ > 0, "文字編碼器 GGUF 缺少必要欄位（arch=%s）",
            arch.c_str());
   if (n_layers != present) MX_INFO("文字編碼器：metadata 寫 %d 層，實際 %d 層", n_layers, present);
+  auto mk = [&](const std::string& n) { return stream ? make_linear_streamed(dw_, n) : make_linear(dw_, n); };
+  blocks_.reserve(present);  // streamer 持有 Linear 指標，不可重新配置
   for (int i = 0; i < present; i++) {
     std::string p = "blk." + std::to_string(i) + ".";
     Block b;
-    b.q = make_linear(dw_, p + "attn_q");
-    b.k = make_linear(dw_, p + "attn_k");
-    b.v = make_linear(dw_, p + "attn_v");
-    b.o = make_linear(dw_, p + "attn_output");
-    b.gate = make_linear(dw_, p + "ffn_gate");
-    b.up = make_linear(dw_, p + "ffn_up");
-    b.down = make_linear(dw_, p + "ffn_down");
+    b.q = mk(p + "attn_q");
+    b.k = mk(p + "attn_k");
+    b.v = mk(p + "attn_v");
+    b.o = mk(p + "attn_output");
+    b.gate = mk(p + "ffn_gate");
+    b.up = mk(p + "ffn_up");
+    b.down = mk(p + "ffn_down");
     b.attn_norm = dw_.f32(p + "attn_norm.weight");
     b.ffn_norm = dw_.f32(p + "ffn_norm.weight");
     b.q_norm = dw_.f32(p + "attn_q_norm.weight");
@@ -44,8 +47,13 @@ Qwen3TextEncoder::Qwen3TextEncoder(const TensorStore& st, int device) : st_(st),
     blocks_.push_back(b);
   }
   if (!ffn_) ffn_ = blocks_[0].gate.out;
-  MX_INFO("文字編碼器：%d 層、dim %lld、頭 %d/%d×%d，權重 %.2f GiB", present, (long long)dim_,
-          heads_, kv_heads_, head_dim_, dw_.bytes() / 1073741824.0);
+  if (stream) {
+    streamer_ = std::make_unique<BlockStreamer>(device);
+    for (auto& b : blocks_) streamer_->add_block(st, {&b.q, &b.k, &b.v, &b.o, &b.gate, &b.up, &b.down});
+    streamer_->finalize();
+  }
+  MX_INFO("文字編碼器：%d 層、dim %lld、頭 %d/%d×%d，權重 %.2f GiB%s", present, (long long)dim_,
+          heads_, kv_heads_, head_dim_, weight_bytes() / 1073741824.0, stream ? "（串流）" : "");
 }
 
 size_t Qwen3TextEncoder::scratch_bytes() const {
@@ -131,7 +139,10 @@ void Qwen3TextEncoder::encode(Ctx& c, const std::vector<int32_t>& ids, bf16* out
   float* sn = c.act.alloc_n<float>(n * half);
   MX_CUDA(cudaMemcpyAsync(cs, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice, c.stream));
   MX_CUDA(cudaMemcpyAsync(sn, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice, c.stream));
-  for (auto& b : blocks_) block(c, b, x, n, cs, sn);
+  for (size_t i = 0; i < blocks_.size(); i++) {
+    if (streamer_) streamer_->acquire(c, int(i));
+    block(c, blocks_[i], x, n, cs, sn);
+  }
   f32_to_bf16(x, out, n * dim_, c.stream);
   c.sync();
 }
