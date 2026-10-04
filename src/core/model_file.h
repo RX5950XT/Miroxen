@@ -41,7 +41,7 @@ class TensorStore {
   TensorStore& operator=(TensorStore&&) noexcept;
 
   // 依副檔名判斷 .gguf / .safetensors；prefix 會被剝除（例如 "model.diffusion_model."），
-  // 傳空字串表示自動剝除常見前綴：model.diffusion_model. / diffusion_model. / model.
+  // 傳空字串表示自動剝除常見前綴：model.diffusion_model. / diffusion_model.（不剝除單獨的 model.）
   void add_file(const std::string& path, const std::string& strip_prefix = "");
 
   const WeightRef* find(const std::string& name) const;

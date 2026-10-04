@@ -5,6 +5,19 @@
 
 namespace mx {
 
+// CUDA 預設把 SM 較多的卡排第一（本機 3060 Ti 38 SM > 5060 Ti 36 SM），
+// 和 nvidia-smi 相反。在任何 CUDA 呼叫前固定成 PCI 匯流排順序（使用者已設定則不覆寫）。
+static const int kDeviceOrder = [] {
+  if (!std::getenv("CUDA_DEVICE_ORDER")) {
+#ifdef _WIN32
+    _putenv_s("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
+#else
+    setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID", 0);
+#endif
+  }
+  return 0;
+}();
+
 int log_level() {
   static int lv = [] {
     const char* e = std::getenv("MX_LOG");
