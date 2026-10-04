@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Miroxen</title>
+  <link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Miroxen</div>
+    <div id="models" class="models" aria-label="模型狀態"></div>
+    <div class="top-meta">
+      <span id="queue" class="queue">佇列 0</span>
+      <div id="gpus" class="gpus" aria-label="顯示卡記憶體"></div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <form id="form" class="controls" novalidate>
+      <div class="modes" role="group" aria-label="模式">
+        <button type="button" id="mode-image" aria-pressed="true">圖像</button>
+        <button type="button" id="mode-video" aria-pressed="false">影片</button>
+      </div>
+
+      <label class="field">提示詞
+        <textarea id="prompt" rows="5" maxlength="8000" placeholder="描述你要的畫面"></textarea>
+      </label>
+
+      <details id="negative-wrap">
+        <summary>負向提示詞</summary>
+        <textarea id="negative" rows="2" maxlength="8000" placeholder="不想出現的內容"></textarea>
+      </details>
+
+      <fieldset>
+        <legend>尺寸</legend>
+        <div id="sizes" class="sizes" role="group" aria-label="尺寸"></div>
+      </fieldset>
+
+      <div class="grid2">
+        <label class="field">步數
+          <input id="steps" type="number" min="1" max="200" value="40" inputmode="numeric">
+        </label>
+        <label class="field" id="cfg-wrap">CFG
+          <input id="cfg" type="number" min="0" max="20" step="0.1" value="1">
+        </label>
+        <label class="field" id="frames-wrap" hidden>幀數
+          <input id="frames" type="number" min="5" max="361" value="56" inputmode="numeric">
+        </label>
+        <label class="field seed-field">種子
+          <span class="seed-row">
+            <input id="seed" type="number" value="-1" inputmode="numeric">
+            <button type="button" id="randomize">隨機</button>
+          </span>
+        </label>
+      </div>
+
+      <div id="frame-files" class="frame-files" hidden>
+        <label class="field">首幀
+          <input id="first-frame" type="file" accept="image/png,image/jpeg">
+        </label>
+        <label class="field">尾幀
+          <input id="last-frame" type="file" accept="image/png,image/jpeg">
+        </label>
+      </div>
+
+      <section class="loras" aria-label="LoRA">
+        <h2>LoRA</h2>
+        <div id="loras"></div>
+      </section>
+
+      <div id="refs-wrap">
+        <div class="drop" id="drop">
+          <label>
+            <input id="ref-input" class="file-input" type="file" accept="image/png,image/jpeg" multiple>
+            拖放參考圖，或按一下選擇（PNG、JPEG，最多 10 張）
+          </label>
+        </div>
+        <ul id="ref-list" class="ref-list"></ul>
+      </div>
+
+      <p id="form-error" class="error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="submit" id="generate" class="primary">生成</button>
+        <button type="button" id="cancel" hidden>取消</button>
+      </div>
+      <div id="meter" class="meter" hidden><span id="meter-bar"></span></div>
+      <p id="status" class="status" aria-live="polite"></p>
+    </form>
+
+    <main>
+      <section class="viewer" aria-label="結果">
+        <p id="empty" class="empty">寫下提示詞，按「生成」。圖像或影片會顯示在這裡。</p>
+        <div id="skeleton" class="skeleton" hidden></div>
+        <img id="result-img" alt="" hidden>
+        <video id="result-video" controls hidden></video>
+        <p id="viewer-error" class="error" role="alert" hidden></p>
+        <p id="caption" class="caption" hidden></p>
+      </section>
+      <section aria-label="近期結果">
+        <h2 class="history-title">近期結果</h2>
+        <div id="history" class="history"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/web/app.js"></script>
+</body>
+</html>
