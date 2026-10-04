@@ -10,43 +10,61 @@
 
 namespace mx {
 
+// 支援兩種命名：llama.cpp（blk.N.attn_q）與 HuggingFace（model.layers.N.self_attn.q_proj，
+// 例如 MiniMax-H3 的 32B 編碼器 GGUF，沒有 metadata，超參數由張量形狀推導）。
+static const char* kLlama[] = {"attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down",
+                               "attn_norm", "ffn_norm", "attn_q_norm", "attn_k_norm"};
+static const char* kHf[] = {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+                            "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "input_layernorm",
+                            "post_attention_layernorm", "self_attn.q_norm", "self_attn.k_norm"};
+
 Qwen3TextEncoder::Qwen3TextEncoder(const TensorStore& st, int device, bool stream)
     : st_(st), dw_(st, device) {
-  std::string arch = st.meta_str("general.architecture", "qwen3vl");
-  auto key = [&](const char* k) { return arch + "." + k; };
-  int n_layers = int(st.meta_int(key("block_count"), 0));
-  dim_ = st.meta_int(key("embedding_length"), 0);
-  ffn_ = st.meta_int(key("feed_forward_length"), 0);
-  heads_ = int(st.meta_int(key("attention.head_count"), 0));
-  kv_heads_ = int(st.meta_int(key("attention.head_count_kv"), heads_));
-  head_dim_ = int(st.meta_int(key("attention.key_length"), heads_ ? dim_ / heads_ : 0));
-  if (auto* v = st.meta(key("attention.layer_norm_rms_epsilon"))) eps_ = float(std::get<double>(*v));
-  if (auto* v = st.meta(key("rope.freq_base"))) theta_ = float(std::get<double>(*v));
-  // 截短過的檔案（H3）block_count 可能沒改，以實際存在的層數為準。
+  std::string layer_fmt;  // 每層前綴，%d 為層號
+  const char** names = kLlama;
+  if (st.has("blk.0.attn_q.weight")) {
+    layer_fmt = "blk.%d.";
+    embed_name_ = "token_embd.weight";
+  } else {
+    for (const char* pre : {"model.language_model.", "model.", "language_model.model."})
+      if (st.has(std::string(pre) + "layers.0.self_attn.q_proj.weight")) {
+        layer_fmt = std::string(pre) + "layers.%d.";
+        embed_name_ = std::string(pre) + "embed_tokens.weight";
+        names = kHf;
+        break;
+      }
+  }
+  MX_CHECK(!layer_fmt.empty(), "無法辨識文字編碼器的權重命名（需要 llama.cpp 或 HuggingFace 格式）");
+  auto lname = [&](int i, int k) { return strf(layer_fmt.c_str(), i) + names[k]; };
   int present = 0;
-  while (st.has("blk." + std::to_string(present) + ".attn_q.weight")) present++;
-  MX_CHECK(present > 0 && dim_ > 0 && heads_ > 0, "文字編碼器 GGUF 缺少必要欄位（arch=%s）",
-           arch.c_str());
-  if (n_layers != present) MX_INFO("文字編碼器：metadata 寫 %d 層，實際 %d 層", n_layers, present);
+  while (st.has(lname(present, 0) + ".weight")) present++;
+  const WeightRef& emb = st.get(embed_name_);
+  MX_CHECK(emb.shape.size() == 2, "embedding 形狀錯誤");
+  dim_ = emb.shape[1];
+  head_dim_ = int(st.get(lname(0, 9) + ".weight").numel());
+  heads_ = int(st.get(lname(0, 0) + ".weight").shape[0] / head_dim_);
+  kv_heads_ = int(st.get(lname(0, 1) + ".weight").shape[0] / head_dim_);
+  std::string arch = st.meta_str("general.architecture", "qwen3vl");
+  if (auto* v = st.meta(arch + ".attention.layer_norm_rms_epsilon")) eps_ = float(std::get<double>(*v));
+  if (auto* v = st.meta(arch + ".rope.freq_base")) theta_ = float(std::get<double>(*v));
   auto mk = [&](const std::string& n) { return stream ? make_linear_streamed(dw_, n) : make_linear(dw_, n); };
   blocks_.reserve(present);  // streamer 持有 Linear 指標，不可重新配置
   for (int i = 0; i < present; i++) {
-    std::string p = "blk." + std::to_string(i) + ".";
     Block b;
-    b.q = mk(p + "attn_q");
-    b.k = mk(p + "attn_k");
-    b.v = mk(p + "attn_v");
-    b.o = mk(p + "attn_output");
-    b.gate = mk(p + "ffn_gate");
-    b.up = mk(p + "ffn_up");
-    b.down = mk(p + "ffn_down");
-    b.attn_norm = dw_.f32(p + "attn_norm.weight");
-    b.ffn_norm = dw_.f32(p + "ffn_norm.weight");
-    b.q_norm = dw_.f32(p + "attn_q_norm.weight");
-    b.k_norm = dw_.f32(p + "attn_k_norm.weight");
+    b.q = mk(lname(i, 0));
+    b.k = mk(lname(i, 1));
+    b.v = mk(lname(i, 2));
+    b.o = mk(lname(i, 3));
+    b.gate = mk(lname(i, 4));
+    b.up = mk(lname(i, 5));
+    b.down = mk(lname(i, 6));
+    b.attn_norm = dw_.f32(lname(i, 7) + ".weight");
+    b.ffn_norm = dw_.f32(lname(i, 8) + ".weight");
+    b.q_norm = dw_.f32(lname(i, 9) + ".weight");
+    b.k_norm = dw_.f32(lname(i, 10) + ".weight");
     blocks_.push_back(b);
   }
-  if (!ffn_) ffn_ = blocks_[0].gate.out;
+  ffn_ = blocks_[0].gate.out;
   if (stream) {
     streamer_ = std::make_unique<BlockStreamer>(device);
     for (auto& b : blocks_) streamer_->add_block(st, {&b.q, &b.k, &b.v, &b.o, &b.gate, &b.up, &b.down});
@@ -66,7 +84,7 @@ size_t Qwen3TextEncoder::scratch_bytes() const {
 
 // 只取需要的列：在主機端從映射檔案收集量化列，再上傳反量化。
 void Qwen3TextEncoder::embed(Ctx& c, const std::vector<int32_t>& ids, float* x) {
-  const WeightRef& e = st_.get("token_embd.weight");
+  const WeightRef& e = st_.get(embed_name_);
   MX_CHECK(e.shape.size() == 2 && e.shape[1] == dim_, "token_embd 形狀錯誤");
   size_t row = gtype_row_bytes(e.type, dim_);
   std::vector<uint8_t> host(row * ids.size());

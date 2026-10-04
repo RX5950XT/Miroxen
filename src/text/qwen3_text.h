@@ -33,6 +33,7 @@ class Qwen3TextEncoder {
 
   const TensorStore& st_;
   DeviceWeights dw_;
+  std::string embed_name_;
   std::vector<Block> blocks_;
   std::unique_ptr<BlockStreamer> streamer_;
   int64_t dim_ = 0, ffn_ = 0;
