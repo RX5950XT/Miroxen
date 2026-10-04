@@ -4,6 +4,7 @@ pruned GGUF 用 adaln_t_table（t → 8 維曲線基底，線性內插）取代 
 這裡以 monkeypatch 讓官方模型走同樣的路徑，其餘（打包、RoPE、注意力、SwiGLU）全用官方程式碼。
 用法：python tools/ref/h3_dit_ref.py [gguf] [輸出.safetensors]
 """
+import os
 import sys
 
 import gguf
@@ -102,6 +103,23 @@ assert not missing and not unexpected, (missing[:10], unexpected[:10])
 del sd
 # 官方混合精度：patch 投影、輸出頭、time_embedder 為 fp32，其餘 bf16（載入時已照此轉型）。
 model.eval()
+FP32 = os.environ.get("MX_REF_FP32", "1") == "1"  # 預設 fp32：bf16 參考經 50 層放大後誤差達 5–20%，不適合當裁判
+if FP32:  # fp32 計算（權重仍是 bf16 儲存、使用時升精度），當作「真值」參考
+    for mod in model.modules():
+        if not isinstance(mod, nn.Linear):
+            for name, prm in list(mod.named_parameters(recurse=False)):
+                setattr(mod, name, nn.Parameter(prm.float(), requires_grad=False))
+    nn.Linear.forward = lambda self, x: torch.nn.functional.linear(
+        x.float(), self.weight.float(), None if self.bias is None else self.bias.float())
+    tm.MiniMaxH3AdaLayerNormModulation.forward = lambda self, temb: self.linear(temb.float()).view(
+        -1, 6 * self.hidden_size).chunk(6, dim=-1)
+
+    def out_forward32(self, hs, temb, ti):
+        shift, scale = self.linear(temb.float()).chunk(2, dim=-1)
+        hs = self.norm(hs.float())
+        return hs * (1.0 + scale.index_select(0, ti)) + shift.index_select(0, ti)
+
+    tm.MiniMaxH3AdaLayerNormOut.forward = out_forward32
 
 T, F_lat, LH, LW, A = 20, 2, 16, 28, 8
 txt = (torch.randn(1, T, 5120) * 3).to(torch.bfloat16)
@@ -114,7 +132,8 @@ arows = torch.randn(2 * A, 32)
 tv, ta = 0.37, 0.62
 uniq, tind = MiniMaxH3SetTimestepsStep.build_row_timesteps(vidx, aidx, ncv, nca, T, tv, ta, max(tv, 0.999), 1.0)
 with torch.no_grad():
-    v, a = model(hidden_states=vrows[None], audio_hidden_states=arows[None], encoder_hidden_states=txt,
+    v, a = model(hidden_states=vrows[None], audio_hidden_states=arows[None],
+                 encoder_hidden_states=txt.float() if FP32 else txt,
                  timestep=uniq, timestep_indices=tind, token_tags=token_tags, position_ids=pos,
                  video_indices=vidx, audio_indices=aidx, text_indices=tidx, return_dict=False)
 print("video", v.float().abs().mean().item(), "audio", a.float().abs().mean().item())
