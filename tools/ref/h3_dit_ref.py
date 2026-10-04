@@ -121,6 +121,46 @@ if FP32:  # fp32 計算（權重仍是 bf16 儲存、使用時升精度），當
 
     tm.MiniMaxH3AdaLayerNormOut.forward = out_forward32
 
+DUMP = os.environ.get("MX_REF_DUMP")
+if DUMP:
+    # 用引擎存下的真實輸入（MX_H3_DUMP）跑完整取樣迴圈，比對第一步速度與最終 latent。
+    import json
+
+    m = json.load(open(os.path.join(DUMP, "meta.json")))
+    T, F_lat, LH, LW, A, steps = m["T"], m["F_lat"], m["H"], m["W"], m["A"], m["steps"]
+    rd = lambda n, dt=np.float32: np.fromfile(os.path.join(DUMP, n), dtype=dt)
+    txt = torch.from_numpy(rd("txt.bin", np.uint16).astype(np.int32)).to(torch.int16).view(torch.bfloat16)
+    txt = txt.reshape(1, T, -1).float()
+    vrows = torch.from_numpy(rd("video0.bin")).reshape(-1, 96)
+    arows = torch.from_numpy(rd("audio0.bin")).reshape(-1, 32)
+    tags = torch.full((T,), 1, dtype=torch.long)
+    pos, token_tags, vidx, aidx, tidx, ncv, nca = MiniMaxH3PrepareLayoutStep.build_packed_sequence(
+        tags, F_lat, LH, LW, A, (1, 2, 2), 2, 2, 0)
+    from diffusers.schedulers.scheduling_minimax_h3 import MiniMaxH3Scheduler
+    sv, sa = MiniMaxH3Scheduler(shift=12.0), MiniMaxH3Scheduler(shift=3.0)
+    sv.set_timesteps(steps); sa.set_timesteps(steps)
+    rel = lambda a, b: ((a - b).norm() / b.norm()).item()
+    for i, (tv, ta) in enumerate(zip(sv.timesteps, sa.timesteps)):
+        uniq, tind = MiniMaxH3SetTimestepsStep.build_row_timesteps(vidx, aidx, ncv, nca, T, float(tv), float(ta),
+                                                                   max(float(tv), 0.999), 1.0)
+        with torch.no_grad():
+            v, a = model(hidden_states=vrows[None], audio_hidden_states=arows[None], encoder_hidden_states=txt,
+                         timestep=uniq, timestep_indices=tind, token_tags=token_tags, position_ids=pos,
+                         video_indices=vidx, audio_indices=aidx, text_indices=tidx, return_dict=False)
+        if i == 0:
+            gv = torch.from_numpy(rd("v0_video.bin")).reshape(v[0].shape)
+            ga = torch.from_numpy(rd("v0_audio.bin")).reshape(a[0].shape)
+            print(f"step0 rel err video {rel(gv, v[0].float()):.4f} audio {rel(ga, a[0].float()):.4f}", flush=True)
+        vrows = sv.step(v[0].float(), tv, vrows, return_dict=False)[0]
+        arows = sa.step(a[0].float(), ta, arows, return_dict=False)[0]
+        print("step", i, "t", float(tv), flush=True)
+    fv = torch.from_numpy(rd("video_final.bin")).reshape(vrows.shape)
+    fa = torch.from_numpy(rd("audio_final.bin")).reshape(arows.shape)
+    print(f"final rel err video {rel(fv, vrows):.4f} audio {rel(fa, arows):.4f}")
+    print("final std ours", fv.std().item(), "ref", vrows.std().item())
+    torch.save({"video": vrows, "audio": arows}, os.path.join(DUMP, "ref_final.pt"))
+    sys.exit(0)
+
 T, F_lat, LH, LW, A = 20, 2, 16, 28, 8
 txt = (torch.randn(1, T, 5120) * 3).to(torch.bfloat16)
 tags = torch.full((T,), 1, dtype=torch.long)

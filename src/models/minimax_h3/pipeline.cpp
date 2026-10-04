@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <random>
 
@@ -145,16 +146,40 @@ VideoResult H3Pipeline::generate(const VideoRequest& r, const ProgressFn& cb, co
   MX_CUDA(cudaMemcpy(da.get(), arows.data(), arows.size() * 4, cudaMemcpyHostToDevice));
   auto sv = h3_sigmas(r.steps, 12.f), sa = h3_sigmas(r.steps, 3.f);
   const int n = int(std::min(sv.size(), sa.size())) - 1;
+  // 除錯：MX_H3_DUMP=目錄 時存下文字嵌入、初始雜訊、第一步與最終輸出（給 tools/ref/h3_dit_ref.py 比對）。
+  const char* dump = std::getenv("MX_H3_DUMP");
+  auto dump_dev = [&](const char* name, const void* d, size_t bytes) {
+    std::vector<uint8_t> h(bytes);
+    MX_CUDA(cudaMemcpy(h.data(), d, bytes, cudaMemcpyDeviceToHost));
+    write_file((fs::path(dump) / name).string(), h.data(), h.size());
+  };
+  if (dump) {
+    fs::create_directories(dump);
+    write_file((fs::path(dump) / "txt.bin").string(), reinterpret_cast<const uint8_t*>(txt.data()), txt.size() * 2);
+    dump_dev("video0.bin", dv.get(), dv.size());
+    dump_dev("audio0.bin", da.get(), da.size());
+    std::string meta = strf("{\"T\":%lld,\"F_lat\":%lld,\"H\":%lld,\"W\":%lld,\"A\":%lld,\"steps\":%d}",
+                            (long long)T, (long long)F_lat, (long long)H, (long long)W, (long long)A, r.steps);
+    write_file((fs::path(dump) / "meta.json").string(), reinterpret_cast<const uint8_t*>(meta.data()), meta.size());
+  }
   for (int i = 0; i < n; i++) {
     report("denoise", i, n);
     float tv = 1.f - sv[i], ta = 1.f - sa[i];
     dit_->forward(c, seq, dv.as<float>(), da.as<float>(), {tv, ta, std::max(tv, 0.999f)}, vv.as<float>(),
                   va.as<float>());
+    if (dump && i == 0) {
+      dump_dev("v0_video.bin", vv.get(), vv.size());
+      dump_dev("v0_audio.bin", va.get(), va.size());
+    }
     axpy_f32(dv.as<float>(), vv.as<float>(), sv[i] - sv[i + 1], Nv * Cv, c.stream);
     axpy_f32(da.as<float>(), va.as<float>(), sa[i] - sa[i + 1], Na * Ca, c.stream);
   }
   MX_CUDA(cudaMemcpy(vrows.data(), dv.get(), vrows.size() * 4, cudaMemcpyDeviceToHost));
   MX_CUDA(cudaMemcpy(arows.data(), da.get(), arows.size() * 4, cudaMemcpyDeviceToHost));
+  if (dump) {
+    dump_dev("video_final.bin", dv.get(), dv.size());
+    dump_dev("audio_final.bin", da.get(), da.size());
+  }
 
   // 4. 音訊解碼 → WAV。rows：聲道優先 [2A, 32] → [2, 32, A]。
   report("decode_audio", 0, 1);
