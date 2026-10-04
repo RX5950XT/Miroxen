@@ -1,0 +1,423 @@
+#include "server/server_internal.h"
+
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+
+#include "core/common.h"
+#include "server/image_io.h"
+
+#include "nlohmann/json.hpp"
+
+namespace mx {
+namespace {
+
+using json = nlohmann::json;
+
+std::string trim(std::string s) {
+  auto sp = [](unsigned char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+  while (!s.empty() && sp(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+  while (!s.empty() && sp(static_cast<unsigned char>(s.back()))) s.erase(s.end() - 1);
+  return s;
+}
+
+size_t utf8_len(const std::string& s) {
+  size_t n = 0;
+  for (unsigned char c : s)
+    if ((c & 0xC0) != 0x80) ++n;
+  return n;
+}
+
+bool ends_with_ci(const std::string& s, const std::string& suf) {
+  if (s.size() < suf.size()) return false;
+  for (size_t i = 0; i < suf.size(); ++i) {
+    char a = s[s.size() - suf.size() + i];
+    char b = suf[i];
+    if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+    if (a != b) return false;
+  }
+  return true;
+}
+
+bool lora_name_ok(const std::string& name) {
+  if (name.empty() || name.size() > 240 || name == "." || name == "..") return false;
+  if (name.find("..") != std::string::npos) return false;
+  if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos ||
+      name.find(':') != std::string::npos)
+    return false;
+  for (unsigned char c : name)
+    if (c < 0x20 || c == 0x7f) return false;
+  return ends_with_ci(name, ".safetensors");
+}
+
+std::string resolve_lora(const ServerOptions& opt, const std::string& name) {
+  if (!lora_name_ok(name))
+    throw ApiError(400, "invalid_request_error", "invalid_lora", "LoRA 名稱不合法");
+  std::error_code ec;
+  auto base = std::filesystem::weakly_canonical(utf8_path(opt.lora_dir), ec);
+  if (ec) throw ApiError(400, "invalid_request_error", "lora_not_found", "找不到 LoRA 目錄");
+  auto full = std::filesystem::weakly_canonical(base / utf8_path(name), ec);
+  if (ec || full.parent_path() != base)
+    throw ApiError(400, "invalid_request_error", "invalid_lora", "LoRA 路徑超出目錄");
+  if (!std::filesystem::is_regular_file(full))
+    throw ApiError(400, "invalid_request_error", "lora_not_found", "找不到 LoRA");
+  return full.string();
+}
+
+std::string require_text(const json& j, const char* key, size_t max_chars, bool allow_empty) {
+  if (!j.contains(key)) {
+    if (allow_empty) return {};
+    throw ApiError(400, "invalid_request_error", "missing_field", strf("缺少 %s", key));
+  }
+  if (!j[key].is_string())
+    throw ApiError(400, "invalid_request_error", "invalid_type", strf("%s 必須是字串", key));
+  auto s = trim(j[key].get<std::string>());
+  if (!allow_empty && s.empty())
+    throw ApiError(400, "invalid_request_error", "empty_prompt", strf("%s 不能是空的", key));
+  if (utf8_len(s) > max_chars)
+    throw ApiError(400, "invalid_request_error", "prompt_too_long", strf("%s 超過 %zu 字", key, max_chars));
+  return s;
+}
+
+int read_int(const json& j, const char* key, int fallback) {
+  if (!j.contains(key)) return fallback;
+  if (!j[key].is_number_integer())
+    throw ApiError(400, "invalid_request_error", "invalid_type", strf("%s 必須是整數", key));
+  return j[key].get<int>();
+}
+
+void parse_wh(const json& j, int& w, int& h) {
+  if (j.contains("size")) {
+    if (!j["size"].is_string())
+      throw ApiError(400, "invalid_request_error", "invalid_size", "size 必須是字串");
+    auto s = j["size"].get<std::string>();
+    auto x = s.find('x');
+    if (x == std::string::npos) x = s.find('X');
+    auto a = x == std::string::npos ? std::string() : s.substr(0, x);
+    auto b = x == std::string::npos ? std::string() : s.substr(x + 1);
+    auto digits = [](const std::string& t) {
+      return !t.empty() && std::all_of(t.begin(), t.end(), [](char c) { return c >= '0' && c <= '9'; });
+    };
+    if (!digits(a) || !digits(b))
+      throw ApiError(400, "invalid_request_error", "invalid_size", "size 格式應為 寬x高，例如 1024x1024");
+    try {
+      w = std::stoi(a);
+      h = std::stoi(b);
+    } catch (...) {
+      throw ApiError(400, "invalid_request_error", "invalid_size", "size 無法解析");
+    }
+    return;
+  }
+  if (!j.contains("width") || !j.contains("height"))
+    throw ApiError(400, "invalid_request_error", "invalid_size", "需要 size 或 width 與 height");
+  w = read_int(j, "width", 0);
+  h = read_int(j, "height", 0);
+}
+
+void check_dims(int w, int h, int max_side) {
+  auto bad = [&](int v) { return v < 256 || v > max_side || v % 16 != 0; };
+  if (bad(w) || bad(h))
+    throw ApiError(400, "invalid_request_error", "invalid_size",
+                   strf("寬與高必須是 16 的倍數，且介於 256 與 %d", max_side));
+}
+
+std::string job_type(const json& j, const std::string& forced) {
+  if (!forced.empty()) {
+    if (j.contains("type") && j["type"].is_string() && j["type"].get<std::string>() != forced)
+      throw ApiError(400, "invalid_request_error", "invalid_type", "type 與此端點不符");
+    return forced;
+  }
+  if (!j.contains("type") || !j["type"].is_string())
+    throw ApiError(400, "invalid_request_error", "missing_field", "缺少 type");
+  auto t = j["type"].get<std::string>();
+  if (t != "image" && t != "video")
+    throw ApiError(400, "invalid_request_error", "invalid_type", "type 必須是 image 或 video");
+  return t;
+}
+
+void check_model(Engine& engine, const json& j, const std::string& type) {
+  if (!j.contains("model") || !j["model"].is_string() || trim(j["model"].get<std::string>()).empty())
+    throw ApiError(400, "invalid_request_error", "missing_model", "需要 model");
+  auto id = trim(j["model"].get<std::string>());
+  bool matched = false;
+  std::string kind;
+  bool loaded = false;
+  for (const auto& m : engine.models()) {
+    if (m.id != id) continue;
+    matched = true;
+    kind = m.kind;
+    loaded = m.loaded;
+    break;
+  }
+  if (!matched) throw ApiError(400, "invalid_request_error", "model_not_found", "找不到模型");
+  if (kind != type) throw ApiError(400, "invalid_request_error", "model_kind", "模型種類與此請求不符");
+  if (!loaded) throw ApiError(400, "invalid_request_error", "model_not_loaded", "模型尚未載入");
+}
+
+std::vector<LoraSpec> read_loras(const ServerOptions& opt, const json& j) {
+  std::vector<LoraSpec> out;
+  if (!j.contains("loras")) return out;
+  if (!j["loras"].is_array())
+    throw ApiError(400, "invalid_request_error", "invalid_lora", "loras 必須是陣列");
+  for (auto& item : j["loras"]) {
+    if (!item.is_object() || !item.contains("name") || !item["name"].is_string())
+      throw ApiError(400, "invalid_request_error", "invalid_lora", "LoRA 需要 name");
+    float scale = 1.f;
+    if (item.contains("scale")) {
+      if (!item["scale"].is_number())
+        throw ApiError(400, "invalid_request_error", "invalid_lora", "LoRA scale 必須是數字");
+      scale = item["scale"].get<float>();
+      if (!std::isfinite(scale))
+        throw ApiError(400, "invalid_request_error", "invalid_lora", "LoRA scale 不是有限數字");
+    }
+    out.push_back({resolve_lora(opt, item["name"].get<std::string>()), scale});
+  }
+  return out;
+}
+
+std::string payload_b64(const std::string& in) {
+  if (in.rfind("data:", 0) != 0) return in;
+  auto comma = in.find(',');
+  if (comma == std::string::npos || in.substr(0, comma).find("base64") == std::string::npos)
+    throw std::runtime_error("data URL 必須是 base64");
+  return in.substr(comma + 1);
+}
+
+struct TempGuard {
+  std::vector<std::filesystem::path> paths;
+  bool keep = false;
+  ~TempGuard() {
+    if (keep) return;
+    for (auto& p : paths) {
+      std::error_code ec;
+      std::filesystem::remove(p, ec);
+    }
+  }
+};
+
+std::filesystem::path save_upload(const ServerOptions& opt, const std::string& encoded, TempGuard& guard) {
+  std::vector<uint8_t> raw;
+  try {
+    raw = b64_decode(payload_b64(encoded));
+  } catch (const std::exception& e) {
+    throw ApiError(400, "invalid_request_error", "invalid_image", e.what());
+  }
+  DecodedImage img;
+  try {
+    img = decode_image_bytes(raw.data(), raw.size());
+  } catch (const std::exception& e) {
+    throw ApiError(400, "invalid_request_error", "invalid_image", e.what());
+  }
+  auto png = encode_png(img.pixels.data(), img.width, img.height, img.channels);
+  static std::atomic<uint64_t> seq{1};
+  auto path = utf8_path(opt.out_dir) / "tmp" / ("ref_" + std::to_string(seq.fetch_add(1)) + ".png");
+  guard.paths.push_back(path);
+  try {
+    write_file(path, png.data(), png.size());
+  } catch (const std::exception& e) {
+    throw ApiError(500, "server_error", "write_failed", e.what());
+  }
+  return path;
+}
+
+void read_uploads(const ServerOptions& opt, const json& j, const char* key, std::vector<std::string>& paths,
+                  TempGuard& guard, size_t cap) {
+  if (!j.contains(key)) return;
+  if (!j[key].is_array())
+    throw ApiError(400, "invalid_request_error", "invalid_image", strf("%s 必須是陣列", key));
+  if (j[key].size() > cap)
+    throw ApiError(400, "invalid_request_error", "invalid_image", strf("%s 最多 %zu 張", key, cap));
+  for (auto& item : j[key]) {
+    if (!item.is_string())
+      throw ApiError(400, "invalid_request_error", "invalid_image", "圖片必須是 base64 字串");
+    paths.push_back(save_upload(opt, item.get<std::string>(), guard).string());
+  }
+}
+
+void read_one_upload(const ServerOptions& opt, const json& j, const char* key, std::string& path, TempGuard& guard) {
+  if (!j.contains(key) || j[key].is_null()) return;
+  if (!j[key].is_string())
+    throw ApiError(400, "invalid_request_error", "invalid_image", strf("%s 必須是字串", key));
+  auto s = j[key].get<std::string>();
+  if (s.empty()) return;
+  path = save_upload(opt, s, guard).string();
+}
+
+std::string read_format(const json& j) {
+  if (!j.contains("response_format")) return "b64_json";
+  if (!j["response_format"].is_string())
+    throw ApiError(400, "invalid_request_error", "invalid_format", "response_format 必須是字串");
+  auto f = j["response_format"].get<std::string>();
+  if (f != "b64_json" && f != "url")
+    throw ApiError(400, "invalid_request_error", "invalid_format", "response_format 只能是 b64_json 或 url");
+  return f;
+}
+
+void read_cfg(const json& j, float& cfg) {
+  if (!j.contains("cfg_scale")) return;
+  if (!j["cfg_scale"].is_number())
+    throw ApiError(400, "invalid_request_error", "invalid_cfg", "cfg_scale 必須是數字");
+  cfg = j["cfg_scale"].get<float>();
+  if (!(cfg >= 0.f && cfg <= 20.f))
+    throw ApiError(400, "invalid_request_error", "invalid_cfg", "cfg_scale 必須介於 0 與 20");
+}
+
+json job_value(const Job& job) {
+  json j = {{"id", job.id},
+            {"object", job.type == "video" ? "video.job" : "image.job"},
+            {"type", job.type},
+            {"status", job.status},
+            {"created", job.created},
+            {"prompt", job.prompt},
+            {"progress", {{"stage", job.stage}, {"step", job.step}, {"total", job.total}}}};
+  if (job.has_result)
+    j["result"] = {{"url", job.url}, {"seed", job.seed}, {"seconds", job.seconds}};
+  else
+    j["result"] = nullptr;
+  if (!job.err_message.empty())
+    j["error"] = {{"message", job.err_message}, {"type", job.err_type}, {"code", job.err_code}};
+  else
+    j["error"] = nullptr;
+  return j;
+}
+
+std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const std::string& body,
+                                 const std::string& forced) {
+  json j = json::parse(body);
+  if (!j.is_object()) throw ApiError(400, "invalid_request_error", "invalid_json", "本文必須是 JSON 物件");
+  auto type = job_type(j, forced);
+  check_model(engine, j, type);
+  if (j.contains("n")) {
+    int n = read_int(j, "n", 1);
+    if (n != 1) throw ApiError(400, "invalid_request_error", "invalid_n", "n 必須是 1");
+  }
+  int steps = read_int(j, "steps", type == "video" ? 30 : 40);
+  if (steps < 1 || steps > 200)
+    throw ApiError(400, "invalid_request_error", "invalid_steps", "steps 必須介於 1 與 200");
+  float cfg = 1.f;
+  read_cfg(j, cfg);
+  int64_t seed = -1;
+  if (j.contains("seed")) {
+    if (!j["seed"].is_number_integer())
+      throw ApiError(400, "invalid_request_error", "invalid_type", "seed 必須是整數");
+    seed = j["seed"].get<int64_t>();
+  }
+  int w = 0, h = 0;
+  parse_wh(j, w, h);
+  check_dims(w, h, type == "video" ? 1920 : 2752);
+  auto prompt = require_text(j, "prompt", 8000, false);
+  auto negative = require_text(j, "negative_prompt", 8000, true);
+  auto loras = read_loras(opt, j);
+  TempGuard guard;
+  auto job = std::make_shared<Job>();
+  job->type = type;
+  job->prompt = prompt;
+  job->response_format = read_format(j);
+  if (type == "image") {
+    job->image.prompt = std::move(prompt);
+    job->image.negative_prompt = std::move(negative);
+    job->image.width = w;
+    job->image.height = h;
+    job->image.steps = steps;
+    job->image.cfg_scale = cfg;
+    job->image.seed = seed;
+    job->image.loras = std::move(loras);
+    read_uploads(opt, j, "images", job->image.ref_images, guard, 10);
+  } else {
+    int frames = j.contains("num_frames") ? read_int(j, "num_frames", 56) : read_int(j, "frames", 56);
+    if (frames < 5 || frames > 361)
+      throw ApiError(400, "invalid_request_error", "invalid_frames", "num_frames 必須介於 5 與 361");
+    job->video.prompt = std::move(prompt);
+    job->video.width = w;
+    job->video.height = h;
+    job->video.num_frames = frames;
+    job->video.steps = steps;
+    job->video.seed = seed;
+    job->video.loras = std::move(loras);
+    read_one_upload(opt, j, "first_frame", job->video.first_frame, guard);
+    read_one_upload(opt, j, "last_frame", job->video.last_frame, guard);
+  }
+  job->temps = std::move(guard.paths);
+  guard.keep = true;
+  return job;
+}
+
+}  // namespace
+
+std::string error_json(const std::string& message, const std::string& type, const std::string& code) {
+  json j;
+  j["error"] = {{"message", message}, {"type", type}, {"code", code}};
+  return j.dump();
+}
+
+std::string job_to_json(const Job& job) { return job_value(job).dump(); }
+
+std::string jobs_to_json(const std::vector<std::shared_ptr<Job>>& jobs) {
+  json data = json::array();
+  for (auto& job : jobs) data.push_back(job_value(*job));
+  return json{{"object", "list"}, {"data", std::move(data)}}.dump();
+}
+
+std::string image_sync_json(const Job& job) {
+  json item = {{"seed", job.seed}};
+  if (job.want_b64) item["b64_json"] = b64_encode(job.png.data(), job.png.size());
+  else item["url"] = job.url;
+  return json{{"created", job.created}, {"data", json::array({std::move(item)})}}.dump();
+}
+
+std::string models_json(const std::vector<ModelInfo>& models) {
+  json data = json::array();
+  for (auto& m : models) {
+    data.push_back({{"id", m.id},
+                    {"object", "model"},
+                    {"owned_by", "miroxen"},
+                    {"kind", m.kind},
+                    {"loaded", m.loaded},
+                    {"detail", m.detail}});
+  }
+  return json{{"object", "list"}, {"data", std::move(data)}}.dump();
+}
+
+std::string loras_json(const ServerOptions& opt) {
+  json data = json::array();
+  std::error_code ec;
+  auto dir = utf8_path(opt.lora_dir);
+  if (std::filesystem::is_directory(dir, ec)) {
+    std::vector<json> rows;
+    for (const auto& ent : std::filesystem::directory_iterator(dir, ec)) {
+      if (!ent.is_regular_file()) continue;
+      auto name = path_utf8(ent.path().filename());
+      if (!lora_name_ok(name)) continue;
+      std::error_code fec;
+      auto sz = ent.file_size(fec);
+      if (fec) continue;
+      rows.push_back({{"name", name}, {"size", sz}});
+    }
+    std::sort(rows.begin(), rows.end(), [](const json& a, const json& b) {
+      return a["name"].get<std::string>() < b["name"].get<std::string>();
+    });
+    for (auto& row : rows) data.push_back(std::move(row));
+  }
+  return json{{"data", std::move(data)}}.dump();
+}
+
+std::string system_json(const std::vector<GpuInfo>& gpus, int queue_length) {
+  json arr = json::array();
+  for (auto& g : gpus)
+    arr.push_back({{"index", g.index}, {"name", g.name}, {"total", g.total}, {"free", g.free}});
+  return json{{"gpus", std::move(arr)}, {"queue_length", queue_length}}.dump();
+}
+
+std::shared_ptr<Job> parse_request(const ServerOptions& opt, Engine& engine, const std::string& body,
+                                   const std::string& forced_type) {
+  try {
+    return parse_inner(opt, engine, body, forced_type);
+  } catch (const ApiError&) {
+    throw;
+  } catch (const json::exception&) {
+    throw ApiError(400, "invalid_request_error", "invalid_json", "本文不是合法的 JSON");
+  }
+}
+
+}  // namespace mx
