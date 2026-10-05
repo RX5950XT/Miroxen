@@ -51,24 +51,22 @@ Qwen3VisionEncoder::Qwen3VisionEncoder(const TensorStore& st, int device) : dw_(
   head_dim_ = 72;
   heads_ = int(dim_ / head_dim_);
 
-  // patch 嵌入：Conv3d(3→dim, kernel 2×16×16)。單張圖的兩個時間幀相同，所以兩個切片相加成 2D 線性層。
-  const int K = 3 * kPatch * kPatch;
+  // patch 嵌入：Conv3d(3→dim, kernel 2×16×16, stride 同 kernel) = 線性層，輸入依 (通道, 時間, 列, 行) 攤平。
+  const int P2 = kPatch * kPatch, K = 3 * 2 * P2;
   std::vector<float> wsum(size_t(dim_) * K, 0.f);
   if (nm.hf) {
-    const WeightRef& r = st.get("visual.patch_embed.proj.weight");  // [dim·3, 2, 16, 16]
-    MX_CHECK(r.numel() == dim_ * K * 2, "patch_embed 形狀錯誤");
-    auto v = host_values(r);
-    for (int64_t o = 0; o < dim_; o++)
-      for (int ch = 0; ch < 3; ch++)
-        for (int t = 0; t < 2; t++)
-          for (int k = 0; k < kPatch * kPatch; k++)
-            wsum[o * K + ch * kPatch * kPatch + k] += v[((o * 3 + ch) * 2 + t) * kPatch * kPatch + k];
+    const WeightRef& r = st.get("visual.patch_embed.proj.weight");  // [dim·3, 2, 16, 16] = [dim, 3, 2, 16, 16]
+    MX_CHECK(r.numel() == dim_ * K, "patch_embed 形狀錯誤");
+    wsum = host_values(r);
   } else {
-    for (const char* n : {"v.patch_embd.weight", "v.patch_embd.weight.1"}) {  // 各 [dim, 3, 16, 16]
-      const WeightRef& r = st.get(n);
-      MX_CHECK(r.numel() == dim_ * K, "patch_embd 形狀錯誤");
+    const char* names[2] = {"v.patch_embd.weight", "v.patch_embd.weight.1"};  // 時間切片 0／1，各 [dim, 3, 16, 16]
+    for (int t = 0; t < 2; t++) {
+      const WeightRef& r = st.get(names[t]);
+      MX_CHECK(r.numel() == dim_ * 3 * P2, "patch_embd 形狀錯誤");
       auto v = host_values(r);
-      for (size_t i = 0; i < wsum.size(); i++) wsum[i] += v[i];
+      for (int64_t o = 0; o < dim_; o++)
+        for (int ch = 0; ch < 3; ch++)
+          for (int k = 0; k < P2; k++) wsum[o * K + (ch * 2 + t) * P2 + k] = v[(o * 3 + ch) * P2 + k];
     }
   }
   std::vector<bf16> wb(wsum.size());
@@ -166,11 +164,11 @@ void Qwen3VisionEncoder::merge(Ctx& c, const Merger& m, const float* x, int64_t 
   linear(c, m.fc2, t, g, out);
 }
 
-VisionFeatures Qwen3VisionEncoder::encode(Ctx& c, const uint8_t* rgb, int h, int w) {
+VisionFeatures Qwen3VisionEncoder::encode_pair(Ctx& c, const uint8_t* rgb0, const uint8_t* rgb1, int h, int w) {
   MX_CHECK(h > 0 && w > 0 && h % (kPatch * kMerge) == 0 && w % (kPatch * kMerge) == 0,
            "視覺塔輸入尺寸必須是 32 的倍數（%dx%d）", h, w);
   c.use();
-  const int64_t ph = h / kPatch, pw = w / kPatch, n = ph * pw, K = 3 * kPatch * kPatch;
+  const int64_t ph = h / kPatch, pw = w / kPatch, n = ph * pw, K = 3 * 2 * kPatch * kPatch;
   // token 順序：2×2 合併區塊優先（區塊列、區塊行、區塊內列、區塊內行）。
   std::vector<int64_t> rr(n), cc(n);
   for (int64_t i = 0; i < n; i++) {
@@ -181,12 +179,14 @@ VisionFeatures Qwen3VisionEncoder::encode(Ctx& c, const uint8_t* rgb, int h, int
   std::vector<bf16> patches(n * K);
   for (int64_t i = 0; i < n; i++)
     for (int ch = 0; ch < 3; ch++)
-      for (int y = 0; y < kPatch; y++)
-        for (int x = 0; x < kPatch; x++) {
-          int64_t py = rr[i] * kPatch + y, px = cc[i] * kPatch + x;
-          float v = float(rgb[(py * w + px) * 3 + ch]) / 255.f * 2.f - 1.f;  // mean 0.5、std 0.5
-          patches[i * K + ch * kPatch * kPatch + y * kPatch + x] = __float2bfloat16(v);
-        }
+      for (int t = 0; t < 2; t++)
+        for (int y = 0; y < kPatch; y++)
+          for (int x = 0; x < kPatch; x++) {
+            int64_t py = rr[i] * kPatch + y, px = cc[i] * kPatch + x;
+            const uint8_t* rgb = t ? rgb1 : rgb0;
+            float v = float(rgb[(py * w + px) * 3 + ch]) / 255.f * 2.f - 1.f;  // mean 0.5、std 0.5
+            patches[i * K + ((ch * 2 + t) * kPatch + y) * kPatch + x] = __float2bfloat16(v);
+          }
   // 學到的 48×48 位置表以雙線性（align_corners）縮放到 ph×pw。
   std::vector<float> pos(n * dim_, 0.f);
   auto taps = [&](int64_t idx, int64_t size, int64_t& i0, int64_t& i1, float& f) {

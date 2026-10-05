@@ -18,13 +18,28 @@ struct H3Segment {
   H3Tag tag = H3_VIDEO;
 };
 
+struct H3Block {
+  int64_t start = 0, len = 0;
+};
+
 struct H3Seq {
   int64_t S = 0;
   std::vector<H3Segment> segs;  // 依序覆蓋 [0, S)
   int64_t text_start = 0, text_len = 0;
-  int64_t cond_start = 0, cond_len = 0;     // 條件幀（首／尾幀）影片列
-  int64_t audio_start = 0, audio_len = 0;   // 2A 列（聲道優先）
+  // 條件幀（FL2VA 首／尾幀）與參考（Ref2VA）的影片列、音訊列區塊：資料依序放在 forward 輸入的前段。
+  std::vector<H3Block> vref, aref;
+  int64_t audio_start = 0, audio_len = 0;   // 目標音訊 2A 列（聲道優先）
   int64_t video_start = 0, video_len = 0;   // 目標影片列
+  int64_t vref_len() const {
+    int64_t n = 0;
+    for (auto& b : vref) n += b.len;
+    return n;
+  }
+  int64_t aref_len() const {
+    int64_t n = 0;
+    for (auto& b : aref) n += b.len;
+    return n;
+  }
   DevBuf cos, sin;  // [S, 48]
   DevBuf text;      // token refiner 之後的文字列 f32 [T, dim]
 };
@@ -41,7 +56,7 @@ class H3Dit {
 
   // positions：[S, 3]（t, h, w）浮點座標；txt：文字編碼器輸出 [T, 5120] bf16（裝置）。
   void prepare(Ctx& c, H3Seq& seq, const std::vector<float>& positions, const bf16* txt);
-  // video：[cond_len + video_len, 96] f32（條件列在前）、audio：[audio_len, 32] f32；
+  // video：[vref_len + video_len, 96] f32（參考／條件列在前）、audio：[aref_len + audio_len, 32] f32；
   // timesteps 為各段使用的 t 值（0..1，1=乾淨）。輸出 v_video：[video_len, 96]、v_audio：[audio_len, 32]（f32）。
   void forward(Ctx& c, H3Seq& seq, const float* video, const float* audio,
                const std::vector<float>& timesteps, float* v_video, float* v_audio);

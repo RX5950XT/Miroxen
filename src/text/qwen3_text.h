@@ -19,9 +19,10 @@ struct TextVisionInput {
   std::vector<std::vector<bf16>> deepstack;  // 每份 [rows, dim]，加在第 0、1、2 層輸出的視覺列
   std::vector<int32_t> pos;                  // [n, 3] mRoPE 位置（t, h, w）
 };
-// 依 Qwen3-VL get_rope_index 排位置：文字三軸同步遞增，圖片 t 固定、h/w 為網格座標（皆加上起點），
-// 圖片之後的位置從起點 + max(gh, gw) 接續。imgs 依出現順序對應每段 <|image_pad|>。
-TextVisionInput build_text_vision(const std::vector<int32_t>& ids, int32_t image_pad_id,
+// 依 Qwen3-VL get_rope_index 排位置：文字三軸同步遞增，每個視覺區塊 t 固定、h/w 為網格座標（皆加上起點），
+// 之後的位置從起點 + max(gh, gw) 接續。imgs 依出現順序對應每段連續的佔位 token（pad_ids 中任一種：
+// <|image_pad|> 或 <|video_pad|>；影片的每個時間 patch 是獨立的一段）。
+TextVisionInput build_text_vision(const std::vector<int32_t>& ids, const std::vector<int32_t>& pad_ids,
                                   const std::vector<const VisionFeatures*>& imgs);
 
 class Qwen3TextEncoder {
@@ -33,6 +34,8 @@ class Qwen3TextEncoder {
   int64_t dim() const { return dim_; }
   int layers() const { return int(blocks_.size()); }
   size_t scratch_bytes() const;
+  // encode() n 個 token 需要的啟用值記憶體上限（含圖文輸入與呼叫端的輸出緩衝）。
+  size_t act_bytes(int64_t n) const;
   size_t weight_bytes() const { return dw_.bytes() + (streamer_ ? streamer_->weight_bytes() : 0); }
   bool streaming() const { return streamer_ != nullptr; }
 

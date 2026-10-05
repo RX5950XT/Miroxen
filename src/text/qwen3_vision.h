@@ -18,8 +18,10 @@ struct VisionFeatures {
 class Qwen3VisionEncoder {
  public:
   Qwen3VisionEncoder(const TensorStore& st, int device);
-  // rgb：主機端 [h, w, 3] uint8，h、w 為 32 的倍數（呼叫端先縮放好）。
-  VisionFeatures encode(Ctx& c, const uint8_t* rgb, int h, int w);
+  // rgb：主機端 [h, w, 3] uint8，h、w 為 32 的倍數（呼叫端先縮放好）。單張圖 = 兩個時間幀相同。
+  VisionFeatures encode(Ctx& c, const uint8_t* rgb, int h, int w) { return encode_pair(c, rgb, rgb, h, w); }
+  // 影片的一個時間 patch（相鄰兩幀合成一組 token；Qwen3-VL 每組各自做注意力）。
+  VisionFeatures encode_pair(Ctx& c, const uint8_t* rgb0, const uint8_t* rgb1, int h, int w);
   int64_t out_dim() const { return merger_.fc2.out; }
   size_t act_bytes(int h, int w) const;
   size_t scratch_bytes() const;
@@ -46,7 +48,7 @@ class Qwen3VisionEncoder {
   int64_t dim_ = 1152;
   int heads_ = 16, head_dim_ = 72, grid_side_ = 48;
   float eps_ = 1e-6f;
-  DevBuf patch_w_;  // [dim, 3·16·16] bf16（兩個時間切片相加：單張圖的兩幀相同）
+  DevBuf patch_w_;  // [dim, 3·2·16·16] bf16（Conv3d 權重攤平，輸入順序為 通道、時間、列、行）
   Linear patch_;
   std::vector<float> pos_;  // [grid_side², dim]
   std::vector<Block> blocks_;

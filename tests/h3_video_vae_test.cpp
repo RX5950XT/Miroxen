@@ -131,7 +131,26 @@ static int compare(const TensorStore& weights, const TensorStore& ref, const cha
               c.act.peak() / 1048576.0, vae.decode_act_bytes(16, 28) / 1048576.0,
               encoder_ctx.act.peak() / 1048576.0);
   if (bench && decode_ok && encode_ok) benchmark(vae, layout);
-  return int(!decode_ok) + int(!encode_ok);
+  int video_fail = 0;
+  const char* vref = "models/ref/h3_video_encode_ref.safetensors";  // tools/ref/h3_video_encode_ref.py
+  if (std::filesystem::exists(vref)) {
+    TensorStore vr;
+    vr.add_file(vref, "\x01");
+    const auto& vrgb = vr.get("rgb");
+    auto vexpect = host_f32(vr.get("encoded"));
+    MX_CHECK(vrgb.shape == std::vector<int64_t>({22, 256, 448, 3}), "參考影片 shape 不符");
+    MX_CHECK(H3VideoVae::encoded_frames(22) == 7, "encoded_frames(22) 應為 7");
+    Ctx vc(0, size_t(6) << 30, 0);
+    DevBuf vz(vexpect.size() * sizeof(float), 0);
+    vae.encode_video(vc, static_cast<const uint8_t*>(vrgb.data), 22, 256, 448, vz.as<float>());
+    std::vector<float> vgot(vexpect.size());
+    MX_CUDA(cudaMemcpy(vgot.data(), vz.get(), vz.size(), cudaMemcpyDeviceToHost));
+    double ve = relative_error(vgot, vexpect);
+    video_fail = ve >= 0.03;
+    std::printf("%s encode_video（22 幀→7 latent 幀）：relative error %.6f < 0.03 -> %s，arena %.0f MiB\n", layout, ve,
+                video_fail ? "FAIL" : "PASS", vc.act.peak() / 1048576.0);
+  }
+  return int(!decode_ok) + int(!encode_ok) + video_fail;
 }
 
 int main(int argc, char** argv) {

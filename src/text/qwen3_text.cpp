@@ -82,6 +82,14 @@ size_t Qwen3TextEncoder::scratch_bytes() const {
   return m;
 }
 
+size_t Qwen3TextEncoder::act_bytes(int64_t n) const {
+  const size_t qd = size_t(heads_) * head_dim_, kd = size_t(kv_heads_) * head_dim_;
+  // x(f32)、h、q/k/v/t、gate|up、中間層、cos/sin、視覺嵌入與 3 份 DeepStack、輸出。
+  const size_t per = dim_ * 4 + dim_ * 2 + (qd + 2 * kd + std::max(qd, kd)) * 2 + ffn_ * 3 * 2 + head_dim_ * 4 +
+                     dim_ * 2 * 5 + 64;
+  return size_t(n) * per + (size_t(64) << 20);
+}
+
 // 只取需要的列：在主機端從映射檔案收集量化列，再上傳反量化。
 void Qwen3TextEncoder::embed(Ctx& c, const std::vector<int32_t>& ids, float* x) {
   const WeightRef& e = st_.get(embed_name_);
@@ -137,21 +145,22 @@ void Qwen3TextEncoder::block(Ctx& c, const Block& b, float* x, int64_t n, const 
   gated_residual(x, h, n, dim_, {}, 0, c.stream);
 }
 
-TextVisionInput build_text_vision(const std::vector<int32_t>& ids, int32_t image_pad_id,
+TextVisionInput build_text_vision(const std::vector<int32_t>& ids, const std::vector<int32_t>& pad_ids,
                                   const std::vector<const VisionFeatures*>& imgs) {
+  auto is_pad = [&](int32_t id) { return std::find(pad_ids.begin(), pad_ids.end(), id) != pad_ids.end(); };
   TextVisionInput v;
   const int64_t n = int64_t(ids.size());
   v.pos.resize(n * 3);
   int32_t cur = 0;
   size_t img = 0;
   for (int64_t i = 0; i < n;) {
-    if (ids[i] != image_pad_id) {
+    if (!is_pad(ids[i])) {
       for (int a = 0; a < 3; a++) v.pos[i * 3 + a] = cur;
       cur++, i++;
       continue;
     }
     int64_t j = i;
-    while (j < n && ids[j] == image_pad_id) j++;
+    while (j < n && ids[j] == ids[i]) j++;
     MX_CHECK(img < imgs.size(), "<|image_pad|> 段數多於圖片數");
     const VisionFeatures& f = *imgs[img++];
     MX_CHECK(j - i == f.tokens(), "第 %zu 張圖的佔位數 %lld 與特徵數 %lld 不符", img, (long long)(j - i),

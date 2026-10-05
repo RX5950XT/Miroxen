@@ -141,7 +141,9 @@ void stitch(const std::vector<float>& tile,const std::vector<float>* above,const
       out[((size_t(t)*H+y+yy)*W+x+xx)*channels+c]=v;
     }
 }
-struct Conv {Linear l;int kh=1,kw=1,stride=1,pad=0;};
+// l：最後一個時間平面（單幀路徑只看得到它）；taps：全部時間平面（多幀因果 3D 卷積，前面補 kt-1 個零幀），
+// 第一次編碼影片時才載入（src 指向原始權重）。
+struct Conv {Linear l;std::vector<Linear> taps;const WeightRef* src=nullptr;int kh=1,kw=1,kt=1,stride=1,pad=0,tstride=1;};
 struct Resnet {Conv c1,c2,shortcut;const float *w1=nullptr,*b1=nullptr,*w2=nullptr,*b2=nullptr;};
 struct Level {std::vector<Resnet> blocks;Conv down;};
 struct Block {Linear q,k,v,qkv,proj,ff1,ff2;const float *n1,*n2,*s1,*s2;};
@@ -248,18 +250,34 @@ struct H3VideoVae::Impl {
     const auto& r=small.store().get(name+".weight");
     MX_CHECK(r.shape==std::vector<int64_t>({out,in,3,3,3}) || r.shape==std::vector<int64_t>({out,in,1,1,1}),"H3 VAE conv 形狀錯誤：%s",name.c_str());
     MX_CHECK(r.type==GType::F16||r.type==GType::BF16||r.type==GType::F32,"H3 VAE conv 型別錯誤");
-    int kt=int(r.shape[2]),kh=int(r.shape[3]),kw=int(r.shape[4]),K=in*kh*kw;
-    // 單幀因果卷積只有最後一個 temporal plane 能看到影像，其餘都是補零。
+    Conv cv;cv.kh=int(r.shape[3]);cv.kw=int(r.shape[4]);cv.kt=int(r.shape[2]);cv.stride=stride;cv.pad=cv.kh==1?0:pad;
+    cv.src=&r;cv.l=conv_plane(cv,cv.kt-1,f32(name+".bias",{out}));return cv;
+  }
+  // 第 k 個時間平面 → [out, in·kh·kw] 的 bf16 線性層。
+  Linear conv_plane(const Conv& cv,int k,const float* bias) {
+    const WeightRef& r=*cv.src;
+    const int out=int(r.shape[0]),in=int(r.shape[1]),hw=cv.kh*cv.kw,K=in*hw;
     std::vector<float> host(size_t(out)*K);
     for(int o=0;o<out;++o) for(int c=0;c<in;++c) {
-      size_t src=((size_t(o)*in+c)*kt+kt-1)*kh*kw;
-      dequant_cpu(static_cast<const char*>(r.data)+src*gtype_block_bytes(r.type),r.type,kh*kw,host.data()+size_t(o)*K+c*kh*kw);
+      size_t src=((size_t(o)*in+c)*cv.kt+k)*hw;
+      dequant_cpu(static_cast<const char*>(r.data)+src*gtype_block_bytes(r.type),r.type,hw,host.data()+size_t(o)*K+c*hw);
     }
     DevBuf raw=upload(host),converted(size_t(out)*K*sizeof(bf16),device);
     dequant_to_bf16(raw.get(),GType::F32,int64_t(out)*K,converted.as<bf16>(),nullptr);MX_CUDA(cudaDeviceSynchronize());
-    Conv cv;cv.kh=kh;cv.kw=kw;cv.stride=stride;cv.pad=kh==1?0:pad;
-    cv.l.name=name;cv.l.in=K;cv.l.out=out;cv.l.w={converted.get(),GType::BF16,{out,K}};
-    cv.l.bias=f32(name+".bias",{out});matrices.emplace(name,std::move(converted));return cv;
+    Linear l;l.name=r.name;l.in=K;l.out=out;l.w={converted.get(),GType::BF16,{out,K}};l.bias=bias;
+    matrices.emplace(r.name+"#"+std::to_string(k),std::move(converted));return l;
+  }
+  void ensure_taps(Conv& cv) {
+    if(!cv.src || !cv.taps.empty()) return;
+    for(int k=0;k<cv.kt-1;++k) cv.taps.push_back(conv_plane(cv,k,cv.l.bias));
+    cv.taps.push_back(cv.l);
+  }
+  void ensure_all_taps() {
+    ensure_taps(conv_in);ensure_taps(conv_out);ensure_taps(quant);
+    for(auto& lv:levels) {
+      for(auto& r:lv.blocks) {ensure_taps(r.c1);ensure_taps(r.c2);ensure_taps(r.shortcut);}
+      ensure_taps(lv.down);
+    }
   }
   void load_block(int i) {
     auto base="decoder.transformer_blocks."+std::to_string(i);Block b;
@@ -290,7 +308,7 @@ struct H3VideoVae::Impl {
       if(space_down[i]*time_down[i]>1) {
         auto n=comfy?"encoder.down."+std::to_string(i)+".downsample.conv":
             "encoder.down_blocks."+std::to_string(i)+".downsamplers.0.conv";
-        level.down=load_conv(n,in,in,space_down[i],0);
+        level.down=load_conv(n,in,in,space_down[i],0);level.down.tstride=time_down[i];
       }
       levels.push_back(std::move(level));
     }
@@ -412,6 +430,73 @@ struct H3VideoVae::Impl {
     std::vector<float> host(size_t(hh)*ww*48);
     MX_CUDA(cudaMemcpyAsync(host.data(),moments,host.size()*sizeof(float),cudaMemcpyDeviceToHost,c.stream));c.sync();return host;
   }
+  // 因果 3D 卷積：in 為 Tin 個連續的 [H, W, C] 幀；第 t 個輸出 = Σ_k taps[k]·im2col(in[t·ts + k − (kt−1)])，
+  // 索引為負的幀是補零（直接略過）。回傳輸出幀數。
+  int conv3d(Ctx& c,const Conv& cv,const bf16* in,int Tin,int H,int W,int C,bf16* out,int OH,int OW) {
+    const int kt=int(cv.taps.size()),ts=cv.tstride,Tout=(Tin-1)/ts+1;
+    MX_CHECK(kt>=1,"H3 VAE 3D 卷積缺少時間平面");
+    const int K=C*cv.kh*cv.kw,N=OH*OW,O=int(cv.l.out),rows=std::min(N,std::max(4096,int((size_t(128)<<20)/(size_t(K)*2))));
+    ArenaScope scope(c.act);
+    auto col=c.act.alloc_n<bf16>(size_t(rows)*K);
+    auto acc=c.act.alloc_n<float>(size_t(rows)*O);
+    for(int t=0;t<Tout;++t) for(int start=0;start<N;start+=rows) {
+      int n=std::min(rows,N-start);bool first=true;
+      for(int k=0;k<kt;++k) {
+        int ti=t*ts+k-(kt-1);
+        if(ti<0) continue;
+        h3v::im2col(in+size_t(ti)*H*W*C,col,H,W,C,cv.kh,cv.kw,cv.stride,cv.pad,OH,OW,start,n,c.stream);
+        gemm_bf16(c,col,K,static_cast<const bf16*>(cv.taps[k].w.p),K,acc,true,O,n,O,K,first?0.f:1.f);
+        first=false;
+      }
+      add_bias_f32(acc,cv.l.bias,n,O,c.stream);
+      f32_to_bf16(acc,out+(size_t(t)*N+start)*O,size_t(n)*O,c.stream);
+    }
+    return Tout;
+  }
+  void resnet3d(Ctx& c,const Resnet& r,const bf16* input,bf16* output,int T,int H,int W,int C) {
+    ArenaScope scope(c.act);const int N=H*W,OC=int(r.c1.l.out);
+    auto norm1=c.act.alloc_n<bf16>(size_t(T)*N*C),hidden=c.act.alloc_n<bf16>(size_t(T)*N*OC);
+    auto norm2=c.act.alloc_n<bf16>(size_t(T)*N*OC);
+    for(int t=0;t<T;++t) h3v::groupnorm_silu(input+size_t(t)*N*C,norm1+size_t(t)*N*C,r.w1,r.b1,N,C,groups,enc_eps,c.stream);
+    conv3d(c,r.c1,norm1,T,H,W,C,hidden,H,W);
+    for(int t=0;t<T;++t) h3v::groupnorm_silu(hidden+size_t(t)*N*OC,norm2+size_t(t)*N*OC,r.w2,r.b2,N,OC,groups,enc_eps,c.stream);
+    conv3d(c,r.c2,norm2,T,H,W,OC,output,H,W);
+    if(r.shortcut.l) {conv3d(c,r.shortcut,input,T,H,W,C,hidden,H,W);add_inplace_bf16(output,hidden,size_t(T)*N*OC,c.stream);}
+    else add_inplace_bf16(output,input,size_t(T)*N*OC,c.stream);
+  }
+  // 一段 17 幀（裝置 uint8 [T, H, W, 3]）的一個空間 tile → moments [Tl, h/16, w/16, 48]（主機）。
+  std::vector<float> encode_tile3d(Ctx& c,const uint8_t* clip,int T,int H,int W,int y,int x,int h,int w,int& Tl) {
+    ArenaScope scope(c.act);int max_c=*std::max_element(channels.begin(),channels.end());
+    size_t capacity=size_t(T)*h*w*channels[0];int bh=h,bw=w,bt=T;
+    for(size_t i=0;i<channels.size();++i) {
+      capacity=std::max(capacity,size_t(bt)*bh*bw*channels[i]);
+      if(levels[i].down.l) {bh=space_down[i]==2?bh/2:bh-2;bw=space_down[i]==2?bw/2:bw-2;bt=(bt-1)/time_down[i]+1;}
+    }
+    capacity=std::max(capacity,size_t(bt)*(h/p)*(w/p)*max_c);
+    auto a=c.act.alloc_n<bf16>(capacity),b=c.act.alloc_n<bf16>(capacity);
+    {
+      ArenaScope s2(c.act);auto input=c.act.alloc_n<bf16>(size_t(T)*h*w*3);
+      for(int t=0;t<T;++t) h3v::image_input(clip+size_t(t)*H*W*3,input+size_t(t)*h*w*3,H,W,y,x,h,w,c.stream);
+      conv3d(c,conv_in,input,T,h,w,3,a,h,w);
+    }
+    int C=channels[0],hh=h,ww=w,tt=T;
+    for(size_t i=0;i<levels.size();++i) {
+      for(const auto& r:levels[i].blocks) {resnet3d(c,r,a,b,tt,hh,ww,C);std::swap(a,b);C=int(r.c1.l.out);}
+      if(levels[i].down.l) {
+        int oh=space_down[i]==2?hh/2:hh-2,ow=space_down[i]==2?ww/2:ww-2;
+        MX_CHECK(oh>0 && ow>0,"H3 VAE encoder 空間大小不足");
+        tt=conv3d(c,levels[i].down,a,tt,hh,ww,C,b,oh,ow);std::swap(a,b);hh=oh;ww=ow;
+      }
+    }
+    for(int t=0;t<tt;++t)
+      h3v::groupnorm_silu(a+size_t(t)*hh*ww*C,b+size_t(t)*hh*ww*C,enc_w,enc_b,hh*ww,C,groups,enc_eps,c.stream);
+    conv3d(c,conv_out,b,tt,hh,ww,C,a,hh,ww);conv3d(c,quant,a,tt,hh,ww,48,b,hh,ww);
+    const size_t n=size_t(tt)*hh*ww*48;
+    auto moments=c.act.alloc_n<float>(n);bf16_to_f32(b,moments,n,c.stream);
+    std::vector<float> host(n);
+    MX_CUDA(cudaMemcpyAsync(host.data(),moments,n*sizeof(float),cudaMemcpyDeviceToHost,c.stream));c.sync();
+    Tl=tt;return host;
+  }
   size_t act_bytes(int H,int W) const {
     int h=std::min(H,256/p),w=std::min(W,256/p),T=chunk+overlap,N=T*h*w,S=N+nreg+1;
     Budget b;b.alloc(size_t(S)*D*4);b.alloc(size_t(S)*rot/2*4);b.alloc(size_t(S)*rot/2*4);size_t base=b.used;
@@ -485,6 +570,46 @@ void H3VideoVae::encode_image(Ctx& c,const uint8_t* rgb,int64_t H,int64_t W,floa
   auto gpu=c.act.alloc_n<float>(moments.size());
   MX_CUDA(cudaMemcpyAsync(gpu,moments.data(),moments.size()*sizeof(float),cudaMemcpyHostToDevice,c.stream));
   h3v::channel_normalize(gpu,z,v.mean_buf.as<float>(),v.std_buf.as<float>(),LH*LW,c.stream);
+  c.sync();
+}
+}  // namespace mx
+namespace mx {
+void H3VideoVae::encode_video(Ctx& c,const uint8_t* rgb,int64_t F,int64_t H,int64_t W,float* z) {
+  auto& v=*impl_;MX_CHECK(c.device==v.device && rgb && z,"H3 VAE encode 裝置／指標無效");
+  MX_CHECK(F>=1 && H>=32 && W>=32 && H%32==0 && W%32==0 && H<=4096 && W<=4096,"H3 VAE encode 影片尺寸無效");
+  if(F==1) return encode_image(c,rgb,H,W,z);
+  c.use();v.ensure_all_taps();ArenaScope scope(c.act);
+  const size_t frame=size_t(H)*W*3;const int clips=int((F+v.clip-1)/v.clip),LH=int(H)/v.p,LW=int(W)/v.p;
+  auto dclip=c.act.alloc_n<uint8_t>(frame*v.clip);
+  auto ys=split_tiles(int(H),256,64,v.p),xs=split_tiles(int(W),256,64,v.p);
+  std::vector<float> all;
+  for(int k=0;k<clips;++k) {
+    std::vector<uint8_t> host(frame*v.clip);
+    for(int t=0;t<v.clip;++t) {
+      int64_t src=std::min<int64_t>(int64_t(k)*v.clip+t,F-1);  // 最後一段不足 17 幀時重複最後一幀
+      std::copy_n(rgb+size_t(src)*frame,frame,host.data()+size_t(t)*frame);
+    }
+    MX_CUDA(cudaMemcpyAsync(dclip,host.data(),host.size(),cudaMemcpyHostToDevice,c.stream));
+    int Tl=0;std::vector<float> moments;std::vector<std::vector<float>> previous;
+    for(size_t i=0;i<ys.starts.size();++i) {
+      std::vector<std::vector<float>> row;
+      for(size_t j=0;j<xs.starts.size();++j) {
+        row.push_back(v.encode_tile3d(c,dclip,v.clip,int(H),int(W),ys.starts[i],xs.starts[j],ys.lengths[i],xs.lengths[j],Tl));
+        if(moments.empty()) moments.resize(size_t(Tl)*LH*LW*48);
+        int h=ys.lengths[i]/v.p,w=xs.lengths[j]/v.p,oh=i?ys.overlaps[i-1]/v.p:0,ow=j?xs.overlaps[j-1]/v.p:0;
+        int kh=h-(i+1<ys.starts.size()?ys.overlaps[i]/v.p:0),kw=w-(j+1<xs.starts.size()?xs.overlaps[j]/v.p:0);
+        stitch(row.back(),i?&previous[j]:nullptr,j?&row[j-1]:nullptr,moments,Tl,48,LH,LW,h,w,
+            ys.starts[i]/v.p,xs.starts[j]/v.p,oh,ow,kh,kw);
+      }
+      previous=std::move(row);
+    }
+    all.insert(all.end(),moments.begin(),moments.end());
+  }
+  const int64_t Fl=encoded_frames(F),rows=Fl*LH*LW;
+  MX_CHECK(int64_t(all.size())>=rows*48,"H3 VAE 影片編碼幀數不符");
+  auto gpu=c.act.alloc_n<float>(size_t(rows)*48);
+  MX_CUDA(cudaMemcpyAsync(gpu,all.data(),size_t(rows)*48*sizeof(float),cudaMemcpyHostToDevice,c.stream));
+  h3v::channel_normalize(gpu,z,v.mean_buf.as<float>(),v.std_buf.as<float>(),int(rows),c.stream);
   c.sync();
 }
 }  // namespace mx

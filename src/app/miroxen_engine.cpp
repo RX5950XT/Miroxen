@@ -37,6 +37,9 @@ void fill_defaults(EngineConfig& c) {
   if (c.h3_dit.empty())
     c.h3_dit = first_existing(hd, {"minimax_h3_fl2va_pruned-Q4_K.gguf", "minimax_h3_fl2va_pruned-Q8_0.gguf",
                                    "minimax_h3_fl2va_pruned-Q6_K.gguf"});
+  if (c.h3_dit_ref.empty())
+    c.h3_dit_ref = first_existing(hd, {"minimax_h3_ref2va_pruned-Q4_K.gguf", "minimax_h3_ref2va_pruned-Q8_0.gguf",
+                                       "minimax_h3_ref2va_pruned-Q6_K.gguf", "minimax_h3_ref2va_pruned-Q4_K_M.gguf"});
   if (c.h3_te.empty()) c.h3_te = first_existing(hd, {"qwen3vl_32b_minimax_h3-Q4_K_M.gguf"});
   if (c.h3_vvae.empty()) c.h3_vvae = first_existing(hd, {"vae/minimax_h3_video_vae_fp16.safetensors"});
   if (c.h3_avae.empty()) c.h3_avae = first_existing(hd, {"vae/minimax_h3_audio_vae_fp32.safetensors"});
@@ -94,7 +97,7 @@ class MiroxenEngine : public Engine {
     if (!h3_) {
       qi_.reset();
       if (cb) cb(Progress{"load", 0, 1});
-      H3Paths p{cfg_.h3_dit, cfg_.h3_te, cfg_.h3_vvae, cfg_.h3_avae, cfg_.h3_tok, cfg_.out_dir};
+      H3Paths p{cfg_.h3_dit, cfg_.h3_te, cfg_.h3_vvae, cfg_.h3_avae, cfg_.h3_tok, cfg_.h3_dit_ref, cfg_.out_dir};
       H3Devices d;
       d.compute = h3_compute_ = want;
       h3_ = std::make_unique<H3Pipeline>(p, d);

@@ -3,6 +3,7 @@
 //                  [--ref 參考圖.png ...]（影像編輯，最多 10 張）[--sigmas 1,0.9375,0.875,0.75,0.5,0.25]
 //                  [--shift-terminal 0]（步數蒸餾 LoRA 用，例如 Turbo8：--steps 8 --shift-terminal 0）
 //   miroxen video  -p "prompt" [-W 864 -H 480] [--frames 56] [--steps 30] [--first 首幀.png] [--last 尾幀.png]
+//                  [--ref image=圖.png --ref video=片.mp4 --ref audio=聲.wav]（Ref2VA 參考生成）[--shift 12]
 //   miroxen serve  [--port 8188] [--host 127.0.0.1] [--api-key KEY] [--fake]
 // 模型路徑預設在 models/ 底下，可用 --qi-dit / --qi-te / --qi-vae / --qi-tok 覆寫。
 // --compute bf16|fp8|fp4：DiT 運算精度（fp8/fp4 用 Blackwell 區塊縮放 tensor core）。
@@ -113,6 +114,13 @@ int cmd_video(const Args& a) {
   r.height = a.geti("-H", keyed ? 0 : 480);
   r.num_frames = a.geti("--frames", 56);
   r.video_shift = float(std::atof(a.get("--shift", "12").c_str()));
+  r.ref_image_short_edge = a.geti("--ref-edge", 2048);
+  r.ref_native_canvas = a.get("--ref-native", "0") != "0";
+  for (auto& s : a.refs) {  // Ref2VA：--ref image=圖.png / video=片.mp4 / audio=聲.wav（依提示詞順序）
+    size_t eq = s.find('=');
+    MX_CHECK(eq != std::string::npos, "--ref 格式為 種類=路徑（image／video／audio），收到 %s", s.c_str());
+    r.references.push_back({s.substr(0, eq), s.substr(eq + 1)});
+  }
   r.steps = a.geti("--steps", 30);
   r.seed = a.has("--seed") ? std::atoll(a.get("--seed").c_str()) : -1;
   for (auto& l : a.loras) {

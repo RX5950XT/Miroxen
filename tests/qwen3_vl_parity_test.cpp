@@ -70,7 +70,7 @@ int main() {
     std::vector<int32_t> ids(static_cast<const int32_t*>(ir.data), static_cast<const int32_t*>(ir.data) + ir.numel());
     Qwen3TextEncoder tenc(ts, 0);
     Ctx tc(0, size_t(1) << 30, tenc.scratch_bytes());
-    TextVisionInput tv = build_text_vision(ids, 151655, {&f});
+    TextVisionInput tv = build_text_vision(ids, {151655}, {&f});
     const int64_t n = int64_t(ids.size()), d = tenc.dim();
     DevBuf out(size_t(n) * d * 2, 0);
     tenc.encode(tc, ids, out.as<bf16>(), &tv);

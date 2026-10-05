@@ -28,6 +28,12 @@ struct ImageRequest {
   std::vector<float> sigmas;    // 選填：自訂未位移的 sigma 節點（遞減、首項 1），步數 = 節點數
 };
 
+// MiniMax-H3 Ref2VA 參考（依提示詞裡 <Picture i>／<Video k>／<Audio j> 的順序）。
+struct MediaRef {
+  std::string kind;  // "image"（≤9）／"video"（≤3，自帶音軌也會一起參考）／"audio"（≤3，需搭配圖或影片）
+  std::string path;
+};
+
 struct VideoRequest {
   std::string prompt;
   int width = 864, height = 480;
@@ -36,6 +42,9 @@ struct VideoRequest {
   int64_t seed = -1;
   std::string first_frame, last_frame;  // 選填：首／尾幀圖片路徑
   float video_shift = 12.f;     // 影片排程 shift（官方 12；LightX2V 768p 加速 LoRA 建議 6）
+  std::vector<MediaRef> references;  // 非空 = Ref2VA 參考生成（換用 Ref2VA checkpoint，不可同時給首尾幀）
+  int ref_image_short_edge = 2048;   // 參考圖縮放到的短邊（官方 2048；調小可省時間與顯存）
+  bool ref_native_canvas = false;    // 參考影片畫布：false = 不超過輸出畫布（快，同 LightX2V match）；true = 官方 768p
   std::vector<LoraSpec> loras;
   std::string compute;          // 同 ImageRequest::compute
 };

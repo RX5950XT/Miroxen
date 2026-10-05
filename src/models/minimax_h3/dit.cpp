@@ -282,9 +282,17 @@ void H3Dit::forward(Ctx& c, H3Seq& seq, const float* video, const float* audio,
   float* x = c.act.alloc_n<float>(S * D);
   MX_CUDA(cudaMemcpyAsync(x + seq.text_start * D, seq.text.get(), size_t(seq.text_len) * D * 4,
                           cudaMemcpyDeviceToDevice, c.stream));
-  linear_f32(c, video_in_, video, seq.cond_len, x + seq.cond_start * D);
-  linear_f32(c, video_in_, video + seq.cond_len * video_in_.in, seq.video_len, x + seq.video_start * D);
-  linear_f32(c, audio_in_, audio, seq.audio_len, x + seq.audio_start * D);
+  int64_t vo = 0, ao = 0;
+  for (auto& b : seq.vref) {
+    linear_f32(c, video_in_, video + vo * video_in_.in, b.len, x + b.start * D);
+    vo += b.len;
+  }
+  for (auto& b : seq.aref) {
+    linear_f32(c, audio_in_, audio + ao * audio_in_.in, b.len, x + b.start * D);
+    ao += b.len;
+  }
+  linear_f32(c, video_in_, video + vo * video_in_.in, seq.video_len, x + seq.video_start * D);
+  linear_f32(c, audio_in_, audio + ao * audio_in_.in, seq.audio_len, x + seq.audio_start * D);
 
   const int64_t ms = 18 * D;
   float* mods = c.act.alloc_n<float>(nt * ms);

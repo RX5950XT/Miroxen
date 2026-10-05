@@ -14,7 +14,7 @@ struct EngineConfig {
   std::string qi_dit, qi_te, qi_vae, qi_tok, qi_mmproj;
   int qi_text_device = -1;  // -1 = 自動
   // MiniMax-H3
-  std::string h3_dit, h3_te, h3_vvae, h3_avae, h3_tok;
+  std::string h3_dit, h3_te, h3_vvae, h3_avae, h3_tok, h3_dit_ref;
   std::string out_dir = "out";
   std::string compute = "fp8";  // DiT 運算精度：bf16 / fp8 / fp4（fp8/fp4 需 Blackwell，否則自動退回 bf16）
 };

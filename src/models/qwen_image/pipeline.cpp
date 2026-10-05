@@ -121,9 +121,13 @@ std::vector<bf16> QwenImagePipeline::encode_prompt(const std::string& prompt, in
   auto ids = tok_->encode(text);
   MX_CHECK(int(ids.size()) > drop_idx_, "prompt 編碼後長度異常");
   MX_CHECK(ids.size() <= 4096 + size_t(vision.size() / 13), "prompt 太長（%zu token）", ids.size());
+  const int64_t n = int64_t(ids.size()), dim = te_->dim();
+  if (te_ctx_->act.capacity() < te_->act_bytes(n)) {
+    te_ctx_.reset();
+    te_ctx_ = std::make_unique<Ctx>(dev_.text, te_->act_bytes(n), te_->scratch_bytes() * 2);
+  }
   Ctx& c = *te_ctx_;
   ArenaScope sc(c.act);
-  const int64_t n = int64_t(ids.size()), dim = te_->dim();
   bf16* h = c.act.alloc_n<bf16>(n * dim);
   if (feats.empty()) {
     te_->encode(c, ids, h);
@@ -131,7 +135,7 @@ std::vector<bf16> QwenImagePipeline::encode_prompt(const std::string& prompt, in
     const int32_t pad = tok_->token_id("<|image_pad|>");
     std::vector<const VisionFeatures*> fp;
     for (auto& f : feats) fp.push_back(&f);
-    TextVisionInput tv = build_text_vision(ids, pad, fp);
+    TextVisionInput tv = build_text_vision(ids, {pad}, fp);
     te_->encode(c, ids, h, &tv);
     if (slots) {
       slots->clear();
