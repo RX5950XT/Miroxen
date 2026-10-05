@@ -11,9 +11,16 @@
 
 namespace mx {
 namespace {
-constexpr int kRows = 1024, kTile = 64, kHalo = 12;
-constexpr size_t kWorkspace = 32 * 1024 * 1024;
-struct Image { bf16* p; int h, w, c; int pixels() const { return h*w; } };
+constexpr int kTile = 128, kHalo = 12;
+// 退回 im2col + cuBLAS 的卷積（編碼器、post_quant_conv 等）的暫存上限：GEMM 列數要夠多才吃得滿 GPU。
+// （cuBLAS 直接輸出 bf16 實測 decode PSNR 掉約 1 dB，故保留 f32 累加。）
+constexpr size_t kWorkspace = 128 * 1024 * 1024;
+// (y0, x0)：此區域在整張圖（fh×fw，同解析度）中的起點；不分塊時就是整張圖。
+struct Image {
+  bf16* p; int h, w, c, y0, x0, fh, fw;
+  int pixels() const { return h*w; }
+  Image at(bf16* q, int ch) const { return {q,h,w,ch,y0,x0,fh,fw}; }
+};
 struct Conv { DevBuf weight, bias; int ci, co, k; };
 struct Pool {
   bf16* a[5];
@@ -114,35 +121,66 @@ struct QwenImageVae::Impl {
                        alt+std::to_string(blocks)+".resample.1",co,co,3);
     }
   }
-  Image conv(Ctx& c,const std::string& key,Image x,bf16* out,int stride=1,int pad=-1,bool up=false) {
+  // 分塊時 3x3 卷積只在整張圖邊界補零，其餘各側輸出少一圈（valid），halo 隨層數縮小、不白算。
+  Image out_region(const Conv& cv,const Image& x,int stride,bool up,int* st,int* sl) const {
+    if(stride==2) {
+      MX_CHECK(x.h==x.fh && x.w==x.fw,"VAE stride-2 卷積不支援分塊");
+      *st=*sl=0; return {nullptr,x.h/2,x.w/2,cv.co,0,0,x.fh/2,x.fw/2};
+    }
+    int f=up?2:1, vy=x.y0*f, vx=x.x0*f, vh=x.h*f, vw=x.w*f, fh=x.fh*f, fw=x.fw*f;
+    bool valid=cv.k==3;
+    *st=valid && vy>0; *sl=valid && vx>0;
+    int sb=valid && vy+vh<fh, sr=valid && vx+vw<fw;
+    return {nullptr,vh-*st-sb,vw-*sl-sr,cv.co,vy+*st,vx+*sl,fh,fw};
+  }
+  // residual 非空時輸出再加上它（依兩者在整張圖中的位置對齊）。
+  Image conv(Ctx& c,const std::string& key,Image x,bf16* out,int stride=1,int pad=-1,bool up=false,
+             const Image* residual=nullptr) {
     const auto& cv=convs.at(key);
     MX_CHECK(x.c==cv.ci,"VAE 卷積輸入通道錯誤：%s",key.c_str());
     if(pad<0) pad=cv.k/2;
-    int oh=up?x.h*2:(stride==2?x.h/2:x.h), ow=up?x.w*2:(stride==2?x.w/2:x.w);
+    int st,sl,K=cv.ci*cv.k*cv.k;
+    Image y=out_region(cv,x,stride,up,&st,&sl); y.p=out;
+    int oh=y.h, ow=y.w, ry=0, rx=0, rw=ow;
+    if(residual) {
+      ry=y.y0-residual->y0; rx=y.x0-residual->x0; rw=residual->w;
+      MX_CHECK(residual->c==cv.co && ry>=0 && rx>=0 && ry+oh<=residual->h && rx+ow<=residual->w,
+               "VAE 殘差區域不符：%s",key.c_str());
+    }
+    if(qvae::conv_supported(cv.ci,cv.co)) {
+      qvae::conv(x.p,cv.weight.as<bf16>(),cv.bias.as<float>(),residual?residual->p:nullptr,rw,ry,rx,out,
+                 x.h,x.w,cv.ci,oh,ow,cv.co,cv.k,stride,pad-st,pad-sl,up,c.stream);
+      return y;
+    }
+    MX_CHECK(st==0 && sl==0 && oh==(up?2*x.h:x.h/stride) && ry==0 && rx==0 && rw==ow,
+             "VAE 退回 im2col 的卷積不支援分塊裁切：%s",key.c_str());
+    bool direct=cv.k==1 && stride==1 && !up;  // 1x1 卷積：輸入本身就是 GEMM 的 A。
     ArenaScope scope(c.act);
-    int rows=std::min(kRows,oh*ow), K=cv.ci*cv.k*cv.k;
-    auto* cols=c.act.alloc_n<bf16>(size_t(rows)*K);
+    size_t row_bytes=(direct?0:size_t(K)*2)+size_t(cv.co)*4;
+    int rows=int(std::min<size_t>(kWorkspace/row_bytes,size_t(oh)*ow));
+    auto* cols=direct?nullptr:c.act.alloc_n<bf16>(size_t(rows)*K);
     auto* accum=c.act.alloc_n<float>(size_t(rows)*cv.co);
     for(int start=0;start<oh*ow;start+=rows) {
       int r=std::min(rows,oh*ow-start);
-      qvae::columns(x.p,cols,x.h,x.w,x.c,oh,ow,cv.k,stride,pad,up,start,r,c.stream);
-      gemm_bf16(c,cols,K,cv.weight.as<bf16>(),K,accum,true,cv.co,r,cv.co,K);
-      qvae::finish(accum,cv.bias.as<float>(),out+size_t(start)*cv.co,r,cv.co,c.stream);
+      const bf16* a=direct?x.p+size_t(start)*K:cols;
+      if(!direct) qvae::columns(x.p,cols,x.h,x.w,x.c,oh,ow,cv.k,stride,pad,up,start,r,c.stream);
+      gemm_bf16(c,a,K,cv.weight.as<bf16>(),K,accum,true,cv.co,r,cv.co,K);
+      size_t off=size_t(start)*cv.co;
+      qvae::finish(accum,cv.bias.as<float>(),residual?residual->p+off:nullptr,out+off,r,cv.co,c.stream);
     }
-    return {out,oh,ow,cv.co};
+    return y;
   }
   Image normalize(Ctx& c,const std::string& key,Image x,bf16* out,bool si=true) {
     qvae::norm(x.p,norms.at(key).as<float>(),out,x.pixels(),x.c,si,c.stream);
-    return {out,x.h,x.w,x.c};
+    return x.at(out,x.c);
   }
   Image res(Ctx& c,const std::string& key,Image x,Pool& p) {
     auto n=normalize(c,key+".norm1",x,p.a[2]);
     auto y=conv(c,key+".conv1",n,p.a[3]);
     n=normalize(c,key+".norm2",y,p.a[2]);
-    y=conv(c,key+".conv2",n,p.a[1]);
-    auto skip=x;
-    if(x.c!=y.c) skip=conv(c,key+".conv_shortcut",x,p.a[3]);
-    qvae::add(y.p,skip.p,size_t(y.pixels())*y.c,c.stream);
+    auto skip=x;  // conv1 的輸出已用完，捷徑可寫進 a[3]。
+    if(convs.count(key+".conv_shortcut")) skip=conv(c,key+".conv_shortcut",x,p.a[3]);
+    y=conv(c,key+".conv2",n,p.a[1],1,-1,false,&skip);
     std::swap(p.a[0],p.a[1]); return y;
   }
   Image attention(Ctx& c,const std::string& key,Image x,Pool& p) {
@@ -165,8 +203,7 @@ struct QwenImageVae::Impl {
         qvae::attention_out(out,p.a[2]+size_t(start)*C,size_t(r)*C,c.stream);
       }
     }
-    auto y=conv(c,key+".proj",{p.a[2],x.h,x.w,C},p.a[1]);
-    qvae::add(y.p,x.p,size_t(N)*C,c.stream);
+    auto y=conv(c,key+".proj",x.at(p.a[2],C),p.a[1],1,-1,false,&x);
     std::swap(p.a[0],p.a[1]); return y;
   }
   Image mid(Ctx& c,const std::string& side,Image x,Pool& p) {
@@ -176,7 +213,7 @@ struct QwenImageVae::Impl {
   }
   Image block(Ctx& c,Image x,Pool& p,int i,bool dec,bf16* resample_out=nullptr) {
     std::string key=(dec?"decoder.up_blocks.":"encoder.down_blocks.")+std::to_string(i);
-    Image original{p.a[4],x.h,x.w,x.c};
+    Image original=x.at(p.a[4],x.c);
     if(!dec || i<4)
       MX_CUDA(cudaMemcpyAsync(original.p,x.p,size_t(x.pixels())*x.c*2,cudaMemcpyDeviceToDevice,c.stream));
     for(int j=0;j<(dec?3:2);++j) x=res(c,key+".resnets."+std::to_string(j),x,p);
@@ -185,8 +222,10 @@ struct QwenImageVae::Impl {
              resample_out?resample_out:p.a[1],dec?1:2,dec?1:0,dec);
       if(!resample_out) std::swap(p.a[0],p.a[1]);
     }
-    if(!dec || i<4) qvae::shortcut(x.p,original.p,original.h,original.w,original.c,x.c,
-                                  i<4?2:1,dec?(i<3?2:1):((i>0&&i<4)?2:1),dec,c.stream);
+    int fs=i<4?2:1;
+    if(!dec || i<4) qvae::shortcut(x.p,x.h,x.w,original.p,original.w,original.c,x.c,fs,
+                                  dec?(i<3?2:1):((i>0&&i<4)?2:1),dec,dec?x.y0-fs*original.y0:0,
+                                  dec?x.x0-fs*original.x0:0,c.stream);
     return x;
   }
   Image tail(Ctx& c,Image x,Pool& p) {
@@ -201,41 +240,49 @@ QwenImageVae::QwenImageVae(const TensorStore& st,int device):impl_(nullptr) {
 }
 QwenImageVae::~QwenImageVae() { delete impl_; }
 size_t QwenImageVae::decode_act_bytes(int64_t H,int64_t W) const {
-  size_t n=slot_size(H,W), tiles=tiled(H,W)?tile_slot()*5*2+pixels(H,W)*16*1152*2:0;
-  size_t attn=pixels(H,W)*(1152+128)*4+128*1152*4;
-  return n*5*2+tiles+std::max(kWorkspace,attn)+pixels(H,W)*256*4+8192;
+  // 輸出與 base 常駐；前段 Pool 用完才配置分塊 Pool，兩者取大。
+  // 分塊階段的卷積全走 implicit GEMM／小通道核心，不需 im2col 暫存。
+  size_t count=pixels(H,W), attn=count*(1152+128)*4+128*1152*4;
+  size_t front=slot_size(H,W)*5*2+std::max(kWorkspace,attn);
+  size_t tiles=tiled(H,W)?tile_slot()*5*2:0, base=tiled(H,W)?count*16*1152*2:0;
+  return count*256*4+base+std::max(front,tiles)+8192;
 }
 void QwenImageVae::decode(Ctx& c,const float* z,int64_t H,int64_t W,std::vector<uint8_t>& rgba) {
   size_t count=pixels(H,W);
   MX_CHECK(z && c.device==impl_->device,"VAE decode 的指標或 GPU 不正確");
   MX_CHECK(c.act.capacity()-c.act.used()>=decode_act_bytes(H,W),"VAE decode Arena 空間不足");
-  c.use(); ArenaScope scope(c.act); Pool p(c,slot_size(H,W));
-  Image x{p.a[0],int(H),int(W),64}; qvae::latent_in(z,x.p,int(count),c.stream);
-  x=impl_->conv(c,"post_quant_conv",x,p.a[1]); std::swap(p.a[0],p.a[1]);
-  x=impl_->conv(c,"decoder.conv_in",x,p.a[1]); std::swap(p.a[0],p.a[1]);
-  x=impl_->mid(c,"decoder",x,p);
-  x=impl_->block(c,x,p,0,true);
+  c.use(); ArenaScope scope(c.act);
+  auto* output=c.act.alloc_n<uint8_t>(count*256*4);
   // 第二次放大是前段最大的一張圖；後續分塊只讀它，無須將五個暫存都放大。
   bf16* base=tiled(H,W)?c.act.alloc_n<bf16>(count*16*1152):nullptr;
-  x=impl_->block(c,x,p,1,true,base);
-  auto* output=c.act.alloc_n<uint8_t>(count*256*4);
-  if(!tiled(H,W)) {
-    auto y=impl_->tail(c,x,p);
-    qvae::image_out(y.p,output,y.h,y.w,int(W)*16,0,0,y.h,y.w,0,0,c.stream);
-  } else {
+  Image x;
+  {
+    ArenaScope front(c.act); Pool p(c,slot_size(H,W));
+    x={p.a[0],int(H),int(W),64,0,0,int(H),int(W)}; qvae::latent_in(z,x.p,int(count),c.stream);
+    x=impl_->conv(c,"post_quant_conv",x,p.a[1]); std::swap(p.a[0],p.a[1]);
+    x=impl_->conv(c,"decoder.conv_in",x,p.a[1]); std::swap(p.a[0],p.a[1]);
+    x=impl_->mid(c,"decoder",x,p);
+    x=impl_->block(c,x,p,0,true);
+    x=impl_->block(c,x,p,1,true,base);
+    if(!tiled(H,W)) {
+      auto y=impl_->tail(c,x,p);
+      qvae::image_out(y.p,output,y.h,y.w,int(W)*16,0,0,y.h,y.w,0,0,c.stream);
+    }
+  }
+  if(tiled(H,W)) {
     // 最後三個區塊所需的 halo 為左側 12、右側 11（以此層像素計）。
     // 丟棄重疊區，數學上等同全圖，無須混合；保留全域 attention。
-    // 32x40 與全圖實測：RGBA RMSE 0.11659、PSNR 66.80 dB、max 35；
-    // 差異來自 cuBLAS 分塊尺寸改變後的 bf16 取整，並非截斷依賴範圍。
+    // implicit GEMM 的累加順序與分塊無關：56x72 實測分塊與全圖逐位元相同。
     Pool t(c,tile_slot());
     for(int top=0;top<x.h;top+=kTile) for(int left=0;left<x.w;left+=kTile) {
       int y0=std::max(0,top-kHalo),x0=std::max(0,left-kHalo);
       int y1=std::min(x.h,top+kTile+kHalo),x1=std::min(x.w,left+kTile+kHalo);
-      Image tile{t.a[0],y1-y0,x1-x0,x.c};
+      Image tile{t.a[0],y1-y0,x1-x0,x.c,y0,x0,x.h,x.w};
       qvae::crop(x.p,tile.p,x.w,x.c,y0,x0,tile.h,tile.w,c.stream);
       auto y=impl_->tail(c,tile,t);
-      qvae::image_out(y.p,output,y.h,y.w,int(W)*16,(top-y0)*4,(left-x0)*4,
-           std::min(kTile,x.h-top)*4,std::min(kTile,x.w-left)*4,top*4,left*4,c.stream);
+      int ty=top*4-y.y0, tx=left*4-y.x0, th=std::min(kTile,x.h-top)*4, tw=std::min(kTile,x.w-left)*4;
+      MX_CHECK(ty>=0 && tx>=0 && ty+th<=y.h && tx+tw<=y.w,"VAE 分塊 halo 不足");
+      qvae::image_out(y.p,output,y.h,y.w,int(W)*16,ty,tx,th,tw,top*4,left*4,c.stream);
     }
   }
   rgba.resize(count*256*4);
@@ -251,7 +298,8 @@ void QwenImageVae::encode(Ctx& c,const uint8_t* rgba,int64_t h,int64_t w,float* 
   auto* input=c.act.alloc_n<uint8_t>(count*4);
   MX_CUDA(cudaMemcpyAsync(input,rgba,count*4,cudaMemcpyHostToDevice,c.stream));
   qvae::image_in(input,p.a[0],int(count),c.stream);
-  Image x=impl_->conv(c,"encoder.conv_in",{p.a[0],int(h),int(w),4},p.a[1]); std::swap(p.a[0],p.a[1]);
+  Image x=impl_->conv(c,"encoder.conv_in",{p.a[0],int(h),int(w),4,0,0,int(h),int(w)},p.a[1]);
+  std::swap(p.a[0],p.a[1]);
   for(int i=0;i<5;++i) x=impl_->block(c,x,p,i,false);
   x=impl_->mid(c,"encoder",x,p);
   auto norm=impl_->normalize(c,"encoder.norm_out",x,p.a[2]);
