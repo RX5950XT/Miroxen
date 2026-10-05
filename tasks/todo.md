@@ -71,12 +71,14 @@
   - 影片 VAE 3D 編碼器：im2col 向量化（原佔 52%）、時間 tap 合成一次 GEMM、GroupNorm 1024 執行緒：22 幀 3390 → 1665 ms。
   - Qwen VAE 解碼：自寫 implicit GEMM 卷積、分塊邊緣不白算、分塊 128：2048² 8.3 → 2.4 秒（PSNR 41.4 dB）。
   - 乾淨基準（5060 Ti）：Qwen 1024²・20 步 bf16/fp8/fp4 = 35.0/14.0/9.7 秒；H3 864×480・56 幀 30 步 110 秒、8 步加速 42 秒。
+  - 影片 VAE 解碼器 bias 併進 SwiGLU／殘差相加（Codex）：124 幀 bf16 快 4%、fp8 快 8%，PSNR 不變。
+  - FP8 注意力前處理（Grok 試做，分支 grok-attn 未合併）：Q/K 量化已近記憶體頻寬上限，四個前處理 kernel 1.79 → 1.61 ms，端到端 <0.5%，不值得多 110 行。
   - nsys 分析：H3 DiT 每步的區塊縮放 GEMM 約 164 TFLOPS，已接近 MXFP8 實測上限，主幹再快要靠 fp4。
 - 紋理修正 VAE（madebyollin）可用 `--qi-vae` 直接替換，預設仍用官方。
 
 ## 待做
 
-- [ ] 效能優化：FP8 注意力前處理（約占注意力 10–15%）、LoRA 第一次載入（冷快取約 12 秒）
+- [ ] 效能優化：LoRA 第一次載入（冷快取約 12 秒）；FP8 注意力主 kernel（H3 每次約 11.5 ms）
 - [ ] 與 sd.cpp 做效能對照
 - [ ] H3-Regenerate-2K（官方尚未開源）
 - [ ] Qwen-Image PE 提示詞改寫模型（Qwen3.5 架構，尚未支援）
