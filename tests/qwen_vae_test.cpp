@@ -63,14 +63,20 @@ void benchmark(QwenImageVae& vae) {
   MX_CUDA(cudaMemcpy(z.get(), host.data(), z.size(), cudaMemcpyHostToDevice));
   c.sync();
   std::vector<uint8_t> rgba;
-  const auto start = std::chrono::steady_clock::now();
-  vae.decode(c, z.as<float>(), H, W, rgba);
-  c.sync();
-  const double ms = std::chrono::duration<double, std::milli>(
-      std::chrono::steady_clock::now() - start).count();
-  std::printf("GPU0 decode 2048x2048（含主機輸出）：%.3f ms；arena peak %.3f GiB；"
-              "decode_act_bytes %.3f GiB\n", ms, c.act.peak() / 1073741824.0,
-              estimate / 1073741824.0);
+  // 第一次含 cuBLAS 初始化；GPU 可能與其他工作共用，取三次中位數。
+  double times[3];
+  for (double& ms : times) {
+    const auto start = std::chrono::steady_clock::now();
+    vae.decode(c, z.as<float>(), H, W, rgba);
+    c.sync();
+    ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - start).count();
+  }
+  std::printf("GPU0 decode 2048x2048（含主機輸出）：%.3f / %.3f / %.3f ms；",
+              times[0], times[1], times[2]);
+  std::sort(times, times + 3);
+  std::printf("中位數 %.3f ms；arena peak %.3f GiB；decode_act_bytes %.3f GiB\n", times[1],
+              c.act.peak() / 1073741824.0, estimate / 1073741824.0);
   MX_CHECK(rgba.size() == size_t(2048) * 2048 * 4, "2048x2048 RGBA 大小不符");
   MX_CHECK(c.act.peak() <= estimate, "activation 實際用量超過 decode_act_bytes");
   MX_CHECK(c.act.used() == 0, "decode 沒有釋放 Arena 暫存");
