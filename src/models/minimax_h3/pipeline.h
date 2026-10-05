@@ -9,7 +9,9 @@
 #include "models/minimax_h3/audio_vae.h"
 #include "models/minimax_h3/dit.h"
 #include "models/minimax_h3/video_vae.h"
+#include "server/image_ops.h"
 #include "text/qwen3_text.h"
+#include "text/qwen3_vision.h"
 #include "text/tokenizer.h"
 
 namespace mx {
@@ -32,8 +34,11 @@ struct H3Layout {
   H3Seq seq;
 };
 // anchors：每個條件幀是 "first" 或 "last"（T2VA 為空）。
+// text_tags：每個文字列的模態（關鍵幀的視覺區塊標成 H3_VIDEO）；空 = 全部 H3_TEXT。
 H3Layout h3_build_layout(int64_t T, int64_t F_lat, int64_t H, int64_t W, int64_t A,
-                         const std::vector<std::string>& anchors);
+                         const std::vector<std::string>& anchors, const std::vector<H3Tag>& text_tags = {});
+// MiniMax-H3 畫布：短邊 short_edge、面積上限 max_pixels、兩軸取最接近的 32 倍數（resolve_canvas_size）。
+void h3_canvas(double aspect_w, double aspect_h, int short_edge, int64_t max_pixels, int& w, int& h);
 int h3_align_frames(int frames);        // 對齊到 17n+5
 int64_t h3_latent_frames(int frames);   // (F-5)/17*5+2
 int64_t h3_audio_latents(int frames);   // round(F/24*40)
@@ -47,6 +52,8 @@ class H3Pipeline {
 
  private:
   void apply_loras(const std::vector<LoraSpec>& loras);
+  // 文字（＋關鍵幀）→ 第 50 層隱藏狀態；tags 回傳每列模態。
+  std::vector<bf16> encode_prompt(const std::string& prompt, const std::vector<Rgba>& keys, std::vector<H3Tag>& tags);
   H3Paths paths_;
   H3Devices dev_;
   std::unique_ptr<Tokenizer> tok_;
@@ -55,6 +62,8 @@ class H3Pipeline {
   std::unique_ptr<H3Dit> dit_;
   std::unique_ptr<H3VideoVae> vvae_;
   std::unique_ptr<H3AudioVae> avae_;
+  std::unique_ptr<Qwen3VisionEncoder> vis_;  // 32B 編碼器 GGUF 內的 visual.*，第一次用到才載入
+  std::unique_ptr<Ctx> vis_ctx_;
   std::unique_ptr<Ctx> te_ctx_, dit_ctx_, avae_ctx_;
   std::vector<LoraSpec> active_loras_;
 };

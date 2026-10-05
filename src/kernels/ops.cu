@@ -225,6 +225,22 @@ void gelu_tanh_inplace(bf16* x, int64_t n, cudaStream_t s) {
   });
 }
 
+void gelu_erf_inplace(bf16* x, int64_t n, cudaStream_t s) {
+  launch_map(n, s, [=] __device__(int64_t i) {
+    float v = __bfloat162float(x[i]);
+    x[i] = __float2bfloat16(0.5f * v * (1.f + erff(v * 0.7071067811865476f)));
+  });
+}
+
+void scatter_rows(float* x, int64_t dim, const int32_t* rows, const bf16* src, int64_t n, int add, cudaStream_t s) {
+  launch_map(n * dim, s, [=] __device__(int64_t i) {
+    int64_t r = i / dim, d = i % dim;
+    float v = __bfloat162float(src[i]);
+    float* p = x + int64_t(rows[r]) * dim + d;
+    *p = add ? *p + v : v;
+  });
+}
+
 void silu_inplace_f32(float* x, int64_t n, cudaStream_t s) {
   launch_map(n, s, [=] __device__(int64_t i) { x[i] = x[i] / (1.f + __expf(-x[i])); });
 }

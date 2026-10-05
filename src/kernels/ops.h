@@ -44,6 +44,10 @@ void head_norm_rope(const bf16* in, int64_t S, int64_t in_stride, int64_t col0, 
 void silu_mul(const bf16* gu, int64_t rows, int64_t F, bf16* out, cudaStream_t s);
 // 原地 GELU（tanh 近似）。
 void gelu_tanh_inplace(bf16* x, int64_t n, cudaStream_t s);
+// 原地 GELU（erf 精確版，nn.GELU() 預設）。
+void gelu_erf_inplace(bf16* x, int64_t n, cudaStream_t s);
+// x[rows[i], :] = src[i, :]（add=1 時改為 +=）；rows 為裝置端 int32 [n]、x 為 f32 [*, dim]、src 為 bf16 [n, dim]。
+void scatter_rows(float* x, int64_t dim, const int32_t* rows, const bf16* src, int64_t n, int add, cudaStream_t s);
 void silu_inplace_f32(float* x, int64_t n, cudaStream_t s);
 // y[r, :] += bias（bias 為 f32），bf16 / f32 兩版。
 void add_bias_bf16(bf16* y, const float* bias, int64_t rows, int64_t dim, cudaStream_t s);

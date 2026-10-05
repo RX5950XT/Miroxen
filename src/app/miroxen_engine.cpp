@@ -32,6 +32,7 @@ void fill_defaults(EngineConfig& c) {
     c.qi_te = first_existing(qd, {"Qwen3VL-8B-Instruct-Q4_K_M.gguf", "Qwen3VL-8B-Instruct-Q8_0.gguf"});
   if (c.qi_vae.empty()) c.qi_vae = first_existing(qd, {"vae/qwen_image_2.1_vae_bf16.safetensors"});
   if (c.qi_tok.empty()) c.qi_tok = first_existing(qd, {"hf/processor/tokenizer.json"});
+  if (c.qi_mmproj.empty()) c.qi_mmproj = first_existing(qd, {"mmproj-Qwen3VL-8B-Instruct-F16.gguf"});
   std::string hd = (fs::path(c.models_dir) / "minimax-h3").string();
   if (c.h3_dit.empty())
     c.h3_dit = first_existing(hd, {"minimax_h3_fl2va_pruned-Q4_K.gguf", "minimax_h3_fl2va_pruned-Q8_0.gguf",
@@ -80,7 +81,7 @@ class MiroxenEngine : public Engine {
       QwenImageDevices d;
       d.text = cfg_.qi_text_device;
       d.compute = qi_compute_ = want;
-      qi_ = std::make_unique<QwenImagePipeline>(QwenImagePaths{cfg_.qi_dit, cfg_.qi_te, cfg_.qi_vae, cfg_.qi_tok}, d);
+      qi_ = std::make_unique<QwenImagePipeline>(QwenImagePaths{cfg_.qi_dit, cfg_.qi_te, cfg_.qi_vae, cfg_.qi_tok, cfg_.qi_mmproj}, d);
     }
     return qi_->generate(r, cb, cancel);
   }

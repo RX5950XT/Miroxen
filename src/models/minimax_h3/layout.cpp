@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 
 #include "models/minimax_h3/pipeline.h"
@@ -27,8 +28,22 @@ int h3_align_frames(int f) {
 int64_t h3_latent_frames(int f) { return (f - 5) / 17 * 5 + 2; }
 int64_t h3_audio_latents(int f) { return int64_t(std::llround(double(f) / 24.0 * 40.0)); }
 
+void h3_canvas(double aw, double ah, int short_edge, int64_t max_pixels, int& w, int& h) {
+  MX_CHECK(aw > 0 && ah > 0, "長寬比必須為正");
+  const double ratio = aw / ah;
+  MX_CHECK(ratio >= 0.25 && ratio <= 4.0, "MiniMax-H3 只支援 1:4 到 4:1 的長寬比（%.3f）", ratio);
+  double fw = ratio >= 1 ? short_edge * ratio : short_edge, fh = ratio >= 1 ? short_edge : short_edge / ratio;
+  if (fw * fh > double(max_pixels)) {
+    double s = std::sqrt(double(max_pixels) / (fw * fh));
+    fw *= s, fh *= s;
+  }
+  h = std::max(32, int(std::nearbyint(fh / 32)) * 32);
+  w = std::max(32, int(std::nearbyint(fw / 32)) * 32);
+}
+
 H3Layout h3_build_layout(int64_t T, int64_t F_lat, int64_t H, int64_t W, int64_t A,
-                         const std::vector<std::string>& anchors) {
+                         const std::vector<std::string>& anchors, const std::vector<H3Tag>& text_tags) {
+  MX_CHECK(text_tags.empty() || int64_t(text_tags.size()) == T, "text_tags 長度不符");
   MX_CHECK(H % 2 == 0 && W % 2 == 0, "latent 尺寸必須是偶數");
   H3Layout L;
   L.T = T, L.F_lat = F_lat, L.H = H, L.W = W, L.A = A;
@@ -71,7 +86,13 @@ H3Layout h3_build_layout(int64_t T, int64_t F_lat, int64_t H, int64_t W, int64_t
   for (int64_t f = 0; f < F_lat; f++) frame_rows(s.video_start + f * rpf, ft[f]);
   // 段：t_idx 0 = 影片 t、1 = 音訊 t、2 = 條件幀 t。
   s.segs.clear();
-  if (T) s.segs.push_back({0, T, 0, H3_TEXT});
+  for (int64_t i = 0; i < T;) {  // 文字列依模態切段（視覺區塊用影片的 AdaLN），timestep 跟影片一樣
+    H3Tag g = text_tags.empty() ? H3_TEXT : text_tags[i];
+    int64_t j = i + 1;
+    while (j < T && (text_tags.empty() ? H3_TEXT : text_tags[j]) == g) j++;
+    s.segs.push_back({i, j - i, 0, g});
+    i = j;
+  }
   if (cond) s.segs.push_back({T, cond, 2, H3_VIDEO});
   s.segs.push_back({s.audio_start, audio, 1, H3_AUDIO});
   s.segs.push_back({s.video_start, video, 0, H3_VIDEO});

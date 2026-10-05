@@ -12,14 +12,28 @@ struct QwenImageDitConfig {
   float eps = 1e-6f;
 };
 
+// 編輯用條件圖：文字編碼器序列中從 slot0 起連續 (H/2)·(W/2) 個 <|image_pad|>（每個代表 32×32 像素），
+// 在 DiT 序列裡展開成 H·W 個 latent token（每個 16×16 像素），內容換成 VAE latent。
+struct QwenImageCond {
+  int64_t slot0 = 0;
+  int64_t H = 0, W = 0;            // latent 網格
+  const float* latents = nullptr;  // 裝置 [H·W, 64] f32，已正規化
+};
+
 // 一次生成（固定 prompt）的狀態：序列版面、RoPE 表、prefix K/V 快取。
+// prefix = 文字段與條件圖段交錯；文字段因果、圖片段內部雙向，每段都看得到前面所有列。
 struct QwenImageSeq {
-  int64_t T = 0;        // 文字 token 數（prefix）
+  struct Seg {
+    int64_t start, len;
+    bool text;
+  };
+  int64_t T = 0;        // prefix 列數（文字 + 條件圖）
   int64_t H = 0, W = 0; // 目標 latent 網格
   int64_t N() const { return H * W; }
   int64_t S() const { return T + N(); }
+  std::vector<Seg> segs;  // 依序覆蓋 [0, T)
   DevBuf cos, sin;      // [S, 64]
-  DevBuf txt;           // txt_in 之後的文字列 f32 [T, dim]
+  DevBuf txt;           // prefix 列（txt_in 後的文字、img_in 後的條件圖）f32 [T, dim]
   std::vector<DevBuf> kcache, vcache;  // 每層 [T, H, D] bf16
   bool cached = false;
 };
@@ -31,8 +45,9 @@ class QwenImageDit {
   QMode compute() const { return compute_; }
   const QwenImageDitConfig& cfg() const { return cfg_; }
 
-  // 準備序列：txt 為文字編碼器輸出 [T, ctx_dim]（bf16，裝置）。
-  void prepare(Ctx& c, QwenImageSeq& seq, const bf16* txt, int64_t T, int64_t H, int64_t W);
+  // 準備序列：txt 為文字編碼器輸出 [T, ctx_dim]（bf16，裝置；含條件圖的 <|image_pad|> 列）。
+  void prepare(Ctx& c, QwenImageSeq& seq, const bf16* txt, int64_t T, int64_t H, int64_t W,
+               const std::vector<QwenImageCond>& conds = {});
   // 預測速度場：latents [N, 64] f32 → v [N, 64] f32。t 為 sigma（0..1）。
   // 第一次呼叫算完整序列並填 prefix 快取，之後只算目標 token。
   void forward(Ctx& c, QwenImageSeq& seq, const float* latents, float t, float* v);

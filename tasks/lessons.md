@@ -34,9 +34,22 @@
   改 exp／int→float 轉換沒有幫助，瓶頸是 MMA 速率與佔用率。
 
 ## 建置
-- 改了 class 成員（例如 BlockStreamer）後出現「invalid resource handle」、日誌數字每次不同這類記憶體被寫壞的症狀，
-  先 `cmake --build build --target clean` 再建置：曾有目標沒跟著標頭重編，新舊物件大小不一致。
+- 改了 class 成員或 struct（例如 BlockStreamer、ImageRequest）後出現「invalid resource handle」、0xc0000409、日誌數字
+  每次不同這類記憶體被寫壞的症狀，根因是 ninja 沒記到標頭依賴：MSVC 的 `/showIncludes` 前綴是中文，編碼跟著主控台
+  字碼頁走（PowerShell 7 是 UTF-8、git-bash 下的 cmd 是 950），和 CMake 設定時偵測到的不同就整個不記。
+  build.bat 已固定 `chcp 65001`；檢查方式 `ninja -C build -t deps | grep -c "#deps 0"` 應為 0。（`VSLANG=1033` 沒效，沒裝英文語言包。）
 
 ## 主機記憶體
 - 串流權重不要在主機留整份鎖頁副本（H3 曾鎖 30+ GB 導致系統記憶體不足被砍）：直接從 mmap 讀到兩塊鎖頁暫存即可，
   CPU 複製與 H2D 都藏在每層計算後面；量化放到 GPU copy stream 上做。
+
+## LoRA 格式（2026-10-05）
+- LightX2V 的 MiniMax-H3 加速 LoRA：key 為 diffusers 命名、中間帶 PEFT adapter 名（`x.lora_A.default.weight`），
+  沒有逐層 alpha，縮放要用 safetensors metadata 的 `alpha`（8，rank 128 → 1/16）；用 1.0 會直接變雜訊。
+- diffusers 的 `ff.net.0.proj` 是 [value; gate]，原始 checkpoint（GGUF）的 `mlp.fc1` 是 [gate; value]：LoRA 的 B 要前後對調。
+  官方實作確認：diffusers `convert_minimax_h3_gated_ff`、LightX2V `value, gate = in_proj(...).chunk(2)`。
+- MiniMax-H3 的 `steps` 是取樣點數，前向次數 = steps − 1；「8 步」加速 LoRA 用 `--steps 9 --shift 6`（768p 版）。
+
+## 數值比對的門檻
+- 和 fp32 參考差幾 % 時先拿官方 bf16 跑一次對照，再判斷是不是 bug：Qwen3-VL 視覺塔官方 bf16 對 fp32 本身就差 5.5%，
+  圖片列有超大激活值通道（1838、2276）差到 15%。我們的數字和官方 bf16 同量級就是精度，不是錯。

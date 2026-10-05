@@ -101,6 +101,7 @@ struct LoraTarget {
   Linear* linear = nullptr;
   int64_t out_off = 0, out_len = -1;  // -1 = 整個輸出
   bool f32 = false;                   // 目標層走 linear_f32
+  bool swap_halves = false;           // LoRA 的輸出前後兩半與目標層相反（套用前對調）
 };
 using LoraResolver = std::function<bool(const std::string& name, LoraTarget& t)>;
 

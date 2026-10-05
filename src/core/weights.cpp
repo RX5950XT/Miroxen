@@ -224,23 +224,28 @@ LoraLoadStats apply_lora(const std::string& path, float user_scale, int device,
     const WeightRef *down = nullptr, *up = nullptr, *alpha = nullptr;
   };
   std::map<std::string, Pair> pairs;
-  static const std::pair<const char*, int> kSuffix[] = {
-      {".lora_A.weight", 0}, {".lora_down.weight", 0}, {".lora.down.weight", 0},
-      {".lora_B.weight", 1}, {".lora_up.weight", 1},   {".lora.up.weight", 1},
-      {".alpha", 2}};
+  // 標記後面可以接 PEFT adapter 名稱，例如 x.lora_A.default.weight。
+  static const std::pair<const char*, int> kMarker[] = {
+      {".lora_A.", 0}, {".lora_down.", 0}, {".lora.down.", 0}, {".lora_B.", 1}, {".lora_up.", 1}, {".lora.up.", 1}};
   LoraLoadStats stats;
   for (auto& name : st.names()) {
     bool hit = false;
-    for (auto& [suf, kind] : kSuffix) {
-      if (!ends_with(name, suf)) continue;
-      Pair& p = pairs[name.substr(0, name.size() - strlen(suf))];
-      const WeightRef* r = &st.get(name);
-      (kind == 0 ? p.down : kind == 1 ? p.up : p.alpha) = r;
+    const WeightRef* r = &st.get(name);
+    if (ends_with(name, ".alpha")) {
+      pairs[name.substr(0, name.size() - 6)].alpha = r;
+      continue;
+    }
+    for (auto& [mk, kind] : kMarker) {
+      size_t pos = name.rfind(mk);
+      if (pos == std::string::npos || !ends_with(name, "weight")) continue;
+      Pair& p = pairs[name.substr(0, pos)];
+      (kind == 0 ? p.down : p.up) = r;
       hit = true;
       break;
     }
     if (!hit) stats.unmatched.push_back(name);
   }
+  const float meta_alpha = float(std::atof(st.meta_str("alpha", "0").c_str()));
   MX_CUDA(cudaSetDevice(device));
   for (auto& [base, p] : pairs) {
     if (!p.down || !p.up) {
@@ -271,7 +276,8 @@ LoraLoadStats apply_lora(const std::string& path, float user_scale, int device,
     d->rank = r;
     d->out_off = t.out_off;
     d->out_len = out_len;
-    float alpha = float(r);
+    // 沒有逐層 alpha 時用檔案 metadata 的 alpha（LightX2V 的 H3 加速 LoRA：alpha 8、rank 128 → 縮放 1/16）。
+    float alpha = meta_alpha > 0.f ? meta_alpha : float(r);
     if (p.alpha) {
       float a = 0;
       dequant_cpu(p.alpha->data, p.alpha->type, 1, &a);
@@ -281,6 +287,14 @@ LoraLoadStats apply_lora(const std::string& path, float user_scale, int device,
     d->f32 = t.f32;
     d->A = to_dev(*p.down, device, t.f32);
     d->B = to_dev(*p.up, device, t.f32);
+    if (t.swap_halves) {  // B 的前後兩半輸出列對調（例如 diffusers 的 [value; gate] → checkpoint 的 [gate; value]）
+      MX_CHECK(out_len % 2 == 0, "LoRA %s：輸出維度不是偶數，無法對調", base.c_str());
+      const size_t half = size_t(out_len / 2) * r * (t.f32 ? 4 : 2);
+      DevBuf sw(2 * half, device);
+      MX_CUDA(cudaMemcpy(sw.get(), static_cast<char*>(d->B.get()) + half, half, cudaMemcpyDeviceToDevice));
+      MX_CUDA(cudaMemcpy(static_cast<char*>(sw.get()) + half, d->B.get(), half, cudaMemcpyDeviceToDevice));
+      d->B = std::move(sw);
+    }
     t.linear->loras.push_back(d);
     stats.applied++;
   }

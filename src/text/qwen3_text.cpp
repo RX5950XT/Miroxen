@@ -137,19 +137,59 @@ void Qwen3TextEncoder::block(Ctx& c, const Block& b, float* x, int64_t n, const 
   gated_residual(x, h, n, dim_, {}, 0, c.stream);
 }
 
-void Qwen3TextEncoder::encode(Ctx& c, const std::vector<int32_t>& ids, bf16* out) {
+TextVisionInput build_text_vision(const std::vector<int32_t>& ids, int32_t image_pad_id,
+                                  const std::vector<const VisionFeatures*>& imgs) {
+  TextVisionInput v;
+  const int64_t n = int64_t(ids.size());
+  v.pos.resize(n * 3);
+  int32_t cur = 0;
+  size_t img = 0;
+  for (int64_t i = 0; i < n;) {
+    if (ids[i] != image_pad_id) {
+      for (int a = 0; a < 3; a++) v.pos[i * 3 + a] = cur;
+      cur++, i++;
+      continue;
+    }
+    int64_t j = i;
+    while (j < n && ids[j] == image_pad_id) j++;
+    MX_CHECK(img < imgs.size(), "<|image_pad|> 段數多於圖片數");
+    const VisionFeatures& f = *imgs[img++];
+    MX_CHECK(j - i == f.tokens(), "第 %zu 張圖的佔位數 %lld 與特徵數 %lld 不符", img, (long long)(j - i),
+             (long long)f.tokens());
+    for (int64_t k = 0; k < f.tokens(); k++) {
+      int64_t r = i + k;
+      v.pos[r * 3] = cur;
+      v.pos[r * 3 + 1] = cur + int32_t(k / f.gw);
+      v.pos[r * 3 + 2] = cur + int32_t(k % f.gw);
+      v.rows.push_back(int32_t(r));
+    }
+    v.embeds.insert(v.embeds.end(), f.embeds.begin(), f.embeds.end());
+    if (v.deepstack.size() < f.deepstack.size()) v.deepstack.resize(f.deepstack.size());
+    for (size_t d = 0; d < f.deepstack.size(); d++)
+      v.deepstack[d].insert(v.deepstack[d].end(), f.deepstack[d].begin(), f.deepstack[d].end());
+    cur += int32_t(std::max(f.gh, f.gw));
+    i = j;
+  }
+  MX_CHECK(img == imgs.size(), "圖片數 %zu 多於 <|image_pad|> 段數 %zu", imgs.size(), img);
+  return v;
+}
+
+void Qwen3TextEncoder::encode(Ctx& c, const std::vector<int32_t>& ids, bf16* out, const TextVisionInput* vis) {
   const int64_t n = int64_t(ids.size());
   MX_CHECK(n > 0, "文字編碼器：輸入為空");
   c.use();
   ArenaScope sc(c.act);
   float* x = c.act.alloc_n<float>(n * dim_);
   embed(c, ids, x);
-  // 純文字時 mRoPE 三軸位置相同，等同一般 RoPE（rotate-half）。
+  // 交錯式 mRoPE（mrope_section [24, 20, 20]）：頻率 j 在 j%3==1 用 h、j%3==2 用 w（j < 60），其餘用 t。
+  // 純文字時三軸位置相同，等同一般 RoPE（rotate-half）。
   const int half = head_dim_ / 2;
   std::vector<float> hc(n * half), hs(n * half);
   for (int64_t p = 0; p < n; p++)
     for (int j = 0; j < half; j++) {
-      double ang = double(p) * std::pow(double(theta_), -2.0 * j / head_dim_);
+      int axis = j < 60 && j % 3 == 1 ? 1 : j < 60 && j % 3 == 2 ? 2 : 0;
+      double pos = vis ? double(vis->pos[p * 3 + axis]) : double(p);
+      double ang = pos * std::pow(double(theta_), -2.0 * j / head_dim_);
       hc[p * half + j] = float(std::cos(ang));
       hs[p * half + j] = float(std::sin(ang));
     }
@@ -157,9 +197,26 @@ void Qwen3TextEncoder::encode(Ctx& c, const std::vector<int32_t>& ids, bf16* out
   float* sn = c.act.alloc_n<float>(n * half);
   MX_CUDA(cudaMemcpyAsync(cs, hc.data(), hc.size() * 4, cudaMemcpyHostToDevice, c.stream));
   MX_CUDA(cudaMemcpyAsync(sn, hs.data(), hs.size() * 4, cudaMemcpyHostToDevice, c.stream));
+  const int64_t nv = vis ? int64_t(vis->rows.size()) : 0;
+  int32_t* rows = nullptr;
+  std::vector<bf16*> ds;
+  if (nv) {
+    MX_CHECK(vis->pos.size() == size_t(n) * 3 && vis->embeds.size() == size_t(nv * dim_), "圖文輸入大小不符");
+    rows = c.act.alloc_n<int32_t>(nv);
+    bf16* e = c.act.alloc_n<bf16>(nv * dim_);
+    MX_CUDA(cudaMemcpyAsync(rows, vis->rows.data(), nv * 4, cudaMemcpyHostToDevice, c.stream));
+    MX_CUDA(cudaMemcpyAsync(e, vis->embeds.data(), nv * dim_ * 2, cudaMemcpyHostToDevice, c.stream));
+    scatter_rows(x, dim_, rows, e, nv, 0, c.stream);
+    for (auto& d : vis->deepstack) {
+      MX_CHECK(d.size() == size_t(nv * dim_), "DeepStack 特徵大小不符");
+      ds.push_back(c.act.alloc_n<bf16>(nv * dim_));
+      MX_CUDA(cudaMemcpyAsync(ds.back(), d.data(), nv * dim_ * 2, cudaMemcpyHostToDevice, c.stream));
+    }
+  }
   for (size_t i = 0; i < blocks_.size(); i++) {
     if (streamer_) streamer_->acquire(c, int(i));
     block(c, blocks_[i], x, n, cs, sn);
+    if (i < ds.size()) scatter_rows(x, dim_, rows, ds[i], nv, 1, c.stream);
   }
   f32_to_bf16(x, out, n * dim_, c.stream);
   c.sync();

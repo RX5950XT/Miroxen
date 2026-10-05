@@ -109,13 +109,36 @@ bool QwenImageDit::resolve_lora(const std::string& name, LoraTarget& t) {
   return false;
 }
 
-void QwenImageDit::prepare(Ctx& c, QwenImageSeq& seq, const bf16* txt, int64_t T, int64_t H,
-                           int64_t W) {
+void QwenImageDit::prepare(Ctx& c, QwenImageSeq& seq, const bf16* txt, int64_t T, int64_t H, int64_t W,
+                           const std::vector<QwenImageCond>& conds) {
   c.use();
   seq = QwenImageSeq{};
-  seq.T = T, seq.H = H, seq.W = W;
+  seq.H = H, seq.W = W;
+  // prefix 版面：條件圖的 <|image_pad|> 列（每列 2×2 個 latent）換成整張圖的 latent 段。
+  struct Run {
+    int64_t src, len;  // 文字段：txt 中的起點；圖片段：conds 索引
+    bool text;
+  };
+  std::vector<Run> runs;
+  int64_t cur = 0;
+  for (size_t i = 0; i < conds.size(); i++) {
+    const auto& cd = conds[i];
+    MX_CHECK(cd.H % 2 == 0 && cd.W % 2 == 0 && cd.slot0 >= cur, "條件圖版面錯誤");
+    MX_CHECK(cd.slot0 + cd.H * cd.W / 4 <= T, "條件圖佔位超出文字序列");
+    if (cd.slot0 > cur) runs.push_back({cur, cd.slot0 - cur, true});
+    runs.push_back({int64_t(i), cd.H * cd.W, false});
+    cur = cd.slot0 + cd.H * cd.W / 4;
+  }
+  if (T > cur) runs.push_back({cur, T - cur, true});
+  int64_t P = 0;
+  for (auto& r : runs) {
+    seq.segs.push_back({P, r.len, r.text});
+    P += r.len;
+  }
+  seq.T = P;
   const int64_t S = seq.S(), dim = cfg_.dim;
-  // RoPE：frame 16 / h 56 / w 56 個通道 → 8 / 28 / 28 組複數對。
+  // RoPE：frame 16 / h 56 / w 56 個通道 → 8 / 28 / 28 組複數對。文字三軸同步遞增；
+  // 每張圖（條件圖與目標圖）frame 固定在當下位置、h/w 以 0 為中心，之後位置前進 max(h, w)。
   const int axes[3] = {16, 56, 56};
   std::vector<float> invf;
   for (int a = 0; a < 3; a++)
@@ -124,29 +147,33 @@ void QwenImageDit::prepare(Ctx& c, QwenImageSeq& seq, const bf16* txt, int64_t T
   const int pairs = int(invf.size());
   MX_CHECK(pairs * 2 == cfg_.head_dim, "RoPE 維度不符");
   std::vector<float> hc(S * pairs), hs(S * pairs);
-  for (int64_t s = 0; s < S; s++) {
-    int64_t f, h, w;
-    if (s < T) {
-      f = h = w = s;
-    } else {
-      int64_t r = (s - T) / W, col = (s - T) % W;
-      f = T;
-      h = r - (H - H / 2);
-      w = col - (W - W / 2);
-    }
+  auto put = [&](int64_t s, int64_t f, int64_t h, int64_t w) {
     for (int p = 0; p < pairs; p++) {
       int64_t pos = p < 8 ? f : p < 36 ? h : w;
       float ang = float(pos) * invf[p];
       hc[s * pairs + p] = std::cos(ang);
       hs[s * pairs + p] = std::sin(ang);
     }
+  };
+  int64_t position = 0, row = 0;
+  auto image = [&](int64_t ih, int64_t iw) {
+    for (int64_t r = 0; r < ih; r++)
+      for (int64_t col = 0; col < iw; col++) put(row++, position, r - (ih - ih / 2), col - (iw - iw / 2));
+    position += std::max(ih, iw);
+  };
+  for (auto& r : runs) {
+    if (r.text)
+      for (int64_t k = 0; k < r.len; k++, position++) put(row++, position, position, position);
+    else
+      image(conds[r.src].H, conds[r.src].W);
   }
+  image(H, W);
   seq.cos = DevBuf(hc.size() * 4, c.device);
   seq.sin = DevBuf(hs.size() * 4, c.device);
   MX_CUDA(cudaMemcpy(seq.cos.get(), hc.data(), hc.size() * 4, cudaMemcpyHostToDevice));
   MX_CUDA(cudaMemcpy(seq.sin.get(), hs.data(), hs.size() * 4, cudaMemcpyHostToDevice));
 
-  // txt_in：zero-centered RMSNorm → Linear → GELU(tanh) → Linear。
+  // txt_in：zero-centered RMSNorm → Linear → GELU(tanh) → Linear（整條文字序列一起算，佔位列之後丟掉）。
   ArenaScope sc(c.act);
   bf16* a = c.act.alloc_n<bf16>(T * std::max(cfg_.ctx_dim, dim));
   bf16* b = c.act.alloc_n<bf16>(T * dim);
@@ -154,11 +181,26 @@ void QwenImageDit::prepare(Ctx& c, QwenImageSeq& seq, const bf16* txt, int64_t T
   linear(c, txt_in1_, a, T, b);
   gelu_tanh_inplace(b, T * dim, c.stream);
   linear(c, txt_in2_, b, T, a);
-  seq.txt = DevBuf(size_t(T) * dim * 4, c.device);
-  bf16_to_f32(a, seq.txt.as<float>(), T * dim, c.stream);
+  seq.txt = DevBuf(size_t(P) * dim * 4, c.device);
+  float* dst = seq.txt.as<float>();
+  for (size_t i = 0; i < runs.size(); i++) {
+    float* out = dst + seq.segs[i].start * dim;
+    if (runs[i].text) {
+      bf16_to_f32(a + runs[i].src * dim, out, runs[i].len * dim, c.stream);
+    } else {
+      const auto& cd = conds[runs[i].src];
+      ArenaScope s2(c.act);
+      const int64_t n = cd.H * cd.W;
+      bf16* lb = c.act.alloc_n<bf16>(n * cfg_.in_ch);
+      bf16* hb = c.act.alloc_n<bf16>(n * dim);
+      f32_to_bf16(cd.latents, lb, n * cfg_.in_ch, c.stream);
+      linear(c, img_in_, lb, n, hb);
+      bf16_to_f32(hb, out, n * dim, c.stream);
+    }
+  }
   for (int i = 0; i < cfg_.layers; i++) {
-    seq.kcache.emplace_back(size_t(T) * dim * sizeof(bf16), c.device);
-    seq.vcache.emplace_back(size_t(T) * dim * sizeof(bf16), c.device);
+    seq.kcache.emplace_back(size_t(P) * dim * sizeof(bf16), c.device);
+    seq.vcache.emplace_back(size_t(P) * dim * sizeof(bf16), c.device);
   }
   c.sync();
 }
@@ -229,11 +271,15 @@ void QwenImageDit::run_block(Ctx& c, QwenImageSeq& seq, int li, float* x, int64_
   AttnParams ap;
   ap.Hq = ap.Hkv = H;
   ap.D = D;
-  if (prefill && T > 0) {  // 文字段：因果，只看文字
-    ap.Sq = ap.Skv = int(T);
-    ap.causal = 1;
-    flash_attn(q, k, v, tmp, ap, c.stream);
-  }
+  if (prefill)  // prefix 各段看自己之前的所有列；文字段內因果、圖片段內雙向
+    for (auto& g : seq.segs) {
+      ap.Sq = int(g.len);
+      ap.Skv = int(g.start + g.len);
+      ap.causal = g.text ? 1 : 0;
+      ap.q_offset = int(g.start);
+      flash_attn(q + g.start * dim, k, v, tmp + g.start * dim, ap, c.stream);
+    }
+  ap.q_offset = 0;
   ap.Sq = int(seq.N());  // 目標圖：看完整序列
   ap.Skv = int(S);
   ap.causal = 0;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "core/dequant.h"
 #include "kernels/attention.h"
@@ -154,7 +155,8 @@ bool H3Dit::resolve_lora(const std::string& name, LoraTarget& t) {
   if (r == "attn.to_k") return t = {&b->qkv, inner_, inner_}, true;
   if (r == "attn.to_v") return t = {&b->qkv, 2 * inner_, inner_}, true;
   if (r == "attn.out_proj" || r == "attn.to_out.0") return t = {&b->out, 0, -1}, true;
-  if (r == "mlp.fc1" || r == "ff.net.0.proj") return t = {&b->fc1, 0, -1}, true;
+  if (r == "mlp.fc1") return t = {&b->fc1, 0, -1}, true;
+  if (r == "ff.net.0.proj") return t = {&b->fc1, 0, -1}, t.swap_halves = true, true;  // diffusers／LightX2V 為 [value; gate]
   if (r == "mlp.fc2" || r == "ff.net.2") return t = {&b->fc2, 0, -1}, true;
   return false;
 }

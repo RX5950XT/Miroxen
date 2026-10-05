@@ -1,4 +1,6 @@
 @echo off
+rem 固定 UTF-8 字碼頁：cl 的 /showIncludes 前綴（中文）編碼才會和 CMake 設定時偵測到的一致，ninja 才記得到標頭依賴
+chcp 65001 >NUL
 rem Usage: build.bat [build_dir=build] [extra cmake args...]
 setlocal
 set BUILD_DIR=%1

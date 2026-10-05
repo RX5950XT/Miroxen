@@ -17,7 +17,7 @@ struct LoraSpec {
 struct ImageRequest {
   std::string prompt;
   std::string negative_prompt;  // 只有 cfg_scale > 1 時使用
-  int width = 1024, height = 1024;
+  int width = 1024, height = 1024;  // 有參考圖時 0 = 依最後一張參考圖的比例（約 1024² 像素）
   int steps = 40;
   float cfg_scale = 1.0f;
   int64_t seed = -1;            // -1 表示隨機
@@ -25,15 +25,17 @@ struct ImageRequest {
   std::vector<LoraSpec> loras;
   std::string compute;          // DiT 運算精度 "bf16"/"fp8"/"fp4"；空 = 引擎預設
   bool shift_terminal = true;   // 排程尾端拉伸到 0.02（官方預設）；步數蒸餾 LoRA（如 Turbo8）要關掉
+  std::vector<float> sigmas;    // 選填：自訂未位移的 sigma 節點（遞減、首項 1），步數 = 節點數
 };
 
 struct VideoRequest {
   std::string prompt;
   int width = 864, height = 480;
   int num_frames = 56;          // 會對齊到 17k+5
-  int steps = 30;
+  int steps = 30;               // 取樣點數；實際前向次數 = steps − 1（8 步加速 LoRA 用 9）
   int64_t seed = -1;
   std::string first_frame, last_frame;  // 選填：首／尾幀圖片路徑
+  float video_shift = 12.f;     // 影片排程 shift（官方 12；LightX2V 768p 加速 LoRA 建議 6）
   std::vector<LoraSpec> loras;
   std::string compute;          // 同 ImageRequest::compute
 };
