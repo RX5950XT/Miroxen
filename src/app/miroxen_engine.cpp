@@ -30,7 +30,9 @@ void fill_defaults(EngineConfig& c) {
     c.qi_dit = first_existing(qd, {"qwen_image_2.1-Q8_0.gguf", "qwen-image-2.1-Q8_0.gguf", "qwen_image_2.1-Q4_K.gguf"});
   if (c.qi_te.empty())
     c.qi_te = first_existing(qd, {"Qwen3VL-8B-Instruct-Q4_K_M.gguf", "Qwen3VL-8B-Instruct-Q8_0.gguf"});
-  if (c.qi_vae.empty()) c.qi_vae = first_existing(qd, {"vae/qwen_image_2.1_vae_bf16.safetensors"});
+  if (c.qi_vae.empty())  // 紋理修正版只改解碼器（編碼器相同），有就優先用
+    c.qi_vae = first_existing(qd, {"vae/texture_fix_vae_for_qwen_image_2.1_bf16.safetensors",
+                                   "vae/qwen_image_2.1_vae_bf16.safetensors"});
   if (c.qi_tok.empty()) c.qi_tok = first_existing(qd, {"hf/processor/tokenizer.json"});
   if (c.qi_mmproj.empty()) c.qi_mmproj = first_existing(qd, {"mmproj-Qwen3VL-8B-Instruct-F16.gguf"});
   std::string hd = (fs::path(c.models_dir) / "minimax-h3").string();

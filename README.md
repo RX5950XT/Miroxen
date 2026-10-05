@@ -41,16 +41,18 @@ build\miroxen.exe image -p "把背景換成夜晚的城市" --ref 原圖.png --s
 - 實測：1024² 編輯 30 步 fp8 約 28 秒（含載入）；下「不改」的指令能忠實還原原圖。
 - 與 diffusers 官方逐段比對：視覺塔誤差 5.6%（官方自己 bf16 對 fp32 也有 5.5%），帶參考圖的 DiT 1.7–1.9%。
 
-## 紋理修正 VAE（選用）
+## 紋理修正 VAE（預設）
 
 [madebyollin/texture-fix-vae-for-qwen-image-2.1](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1)
-是官方 VAE 解碼器的微調版，去掉照片類細節（青苔、草地）上的棋盤格紋，可以直接替換：
+是官方 VAE 解碼器的微調版，去掉照片類細節（青苔、草地）上的棋盤格紋。只改解碼器，編碼器和官方相同，所以編輯讀參考圖不受影響。
+`models/qwen-image-2.1/vae/` 裡有 `texture_fix_vae_for_qwen_image_2.1_bf16.safetensors` 就預設用它，沒有就用官方 VAE；
+要指定官方版：
 
 ```bat
-build\miroxen.exe image -p "..." --qi-vae models\qwen-image-2.1\vae\texture_fix_vae_for_qwen_image_2.1_bf16.safetensors
+build\miroxen.exe image -p "..." --qi-vae models\qwen-image-2.1\vae\qwen_image_2.1_vae_bf16.safetensors
 ```
 
-實測同一組 latent，紋理明顯乾淨；作者標示 PSNR 略低（32.86 → 32.46），所以預設仍用官方 VAE。
+實測同一組 latent，紋理明顯乾淨；作者標示 PSNR 略低（32.86 → 32.46，PSNR 偏好較糊的結果）。
 透明圖（RGBA）也能用：同 seed 比較，主體與邊緣幾乎相同（透明度 PSNR 37 dB），而且背景更乾淨
 （官方 VAE 有 66% 背景像素殘留 1–9 的透明度，紋理修正版幾乎全是 0）。
 
