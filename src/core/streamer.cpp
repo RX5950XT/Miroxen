@@ -26,10 +26,9 @@ BlockStreamer::~BlockStreamer() {
     cudaStreamSynchronize(copy_);
     cudaStreamDestroy(copy_);
   }
-  for (int s = 0; s < 2; s++) {
-    if (copied_[s]) cudaEventDestroy(copied_[s]);
-    if (consumed_[s]) cudaEventDestroy(consumed_[s]);
-  }
+  for (int s = 0; s < 2; s++)
+    for (cudaEvent_t e : {staged_[s], copied_[s], consumed_[s]})
+      if (e) cudaEventDestroy(e);
 }
 
 static size_t align256(size_t v) { return (v + 255) / 256 * 256; }
@@ -45,86 +44,94 @@ void BlockStreamer::add_block(const TensorStore& st, std::vector<Linear*> linear
   Block b;
   for (Linear* l : linears) {
     const WeightRef& r = st.get(l->name + ".weight");
-    b.offs.push_back(b.bytes);
-    if (mode_ == QMode::BF16) {
-      b.bytes += align256(r.nbytes);
-    } else {
+    b.raw_offs.push_back(b.raw_bytes);
+    b.raw_bytes += align256(r.nbytes);
+    if (mode_ != QMode::BF16) {
       MX_CHECK(l->in % 32 == 0, "%s：輸入維度不是 32 的倍數，無法量化成 %s", l->name.c_str(), qmode_name(mode_));
       size_t sf_off, amax_off;
-      b.bytes += qlayout(mode_, *l, sf_off, amax_off);
+      b.q_offs.push_back(b.q_bytes);
+      b.q_bytes += qlayout(mode_, *l, sf_off, amax_off);
+      tmp_max_ = std::max(tmp_max_, size_t(l->in) * l->out * sizeof(bf16));
       l->qw = std::make_shared<QWeight>();
       l->qw->mode = mode_;
     }
     b.refs.push_back(&r);
   }
   b.linears = std::move(linears);
+  total_raw_ += b.raw_bytes;
+  raw_max_ = std::max(raw_max_, b.raw_bytes);
+  q_max_ = std::max(q_max_, b.q_bytes);
   blocks_.push_back(std::move(b));
 }
 
 void BlockStreamer::finalize() {
   MX_CHECK(!blocks_.empty(), "BlockStreamer：沒有登記任何塊");
-  size_t total = 0;
-  for (auto& b : blocks_) {
-    b.host_off = total;
-    total += b.bytes;
-    slot_bytes_ = std::max(slot_bytes_, b.bytes);
-  }
-  host_ = PinnedBuf(total);
   MX_CUDA(cudaSetDevice(dev_));
-  if (mode_ != QMode::BF16) {
-    for (auto& b : blocks_) quantize_block(b, static_cast<char*>(host_.get()) + b.host_off);
-  } else {
-    // 從映射檔案複製到鎖頁記憶體；多執行緒讓磁碟／頁面快取讀取並行。
-    std::vector<std::thread> pool;
-    const int nt = 8;
-    for (int t = 0; t < nt; t++)
-      pool.emplace_back([&, t] {
-        for (size_t i = t; i < blocks_.size(); i += nt) {
-          auto& b = blocks_[i];
-          for (size_t j = 0; j < b.refs.size(); j++)
-            std::memcpy(static_cast<char*>(host_.get()) + b.host_off + b.offs[j], b.refs[j]->data,
-                        b.refs[j]->nbytes);
-        }
-      });
-    for (auto& th : pool) th.join();
-  }
+  const bool quant = mode_ != QMode::BF16;
   for (int s = 0; s < 2; s++) {
-    slots_[s] = DevBuf(slot_bytes_, dev_);
-    MX_CUDA(cudaEventCreateWithFlags(&copied_[s], cudaEventDisableTiming));
-    MX_CUDA(cudaEventCreateWithFlags(&consumed_[s], cudaEventDisableTiming));
+    stage_[s] = PinnedBuf(raw_max_);
+    if (s == 0 || !quant) raw_[s] = DevBuf(raw_max_, dev_);
+    if (quant) q_[s] = DevBuf(q_max_, dev_);
+    for (cudaEvent_t* e : {&staged_[s], &copied_[s], &consumed_[s]})
+      MX_CUDA(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
   }
+  if (quant) tmp_ = DevBuf(tmp_max_, dev_);
   MX_CUDA(cudaStreamCreateWithFlags(&copy_, cudaStreamNonBlocking));
-  MX_INFO("權重串流：%zu 塊、鎖頁 %.2f GiB（%s）、GPU%d 槽 2×%.0f MiB", blocks_.size(), total / 1073741824.0,
-          mode_ == QMode::BF16 ? "原始格式" : qmode_name(mode_), dev_, slot_bytes_ / 1048576.0);
+  const size_t dev_bytes = raw_[0].size() + raw_[1].size() + q_[0].size() + q_[1].size() + tmp_.size();
+  MX_INFO("權重串流：%zu 塊、%.2f GiB 直接讀檔（%s）、鎖頁暫存 2×%.0f MiB、GPU%d 槽 %.0f MiB", blocks_.size(),
+          total_raw_ / 1073741824.0, quant ? qmode_name(mode_) : "原始格式", raw_max_ / 1048576.0, dev_,
+          dev_bytes / 1048576.0);
 }
 
-// 原始權重 → GPU 反量化成 bf16 → 區塊縮放量化 → 下載到鎖頁記憶體（載入時一次）。
-void BlockStreamer::quantize_block(const Block& b, char* host) {
-  DevBuf dst(b.bytes, dev_);
-  for (size_t j = 0; j < b.linears.size(); j++) {
-    const Linear& l = *b.linears[j];
-    const WeightRef& r = *b.refs[j];
-    DevBuf raw(r.nbytes, dev_), tmp(size_t(l.in) * l.out * sizeof(bf16), dev_);
-    MX_CUDA(cudaMemcpy(raw.get(), r.data, r.nbytes, cudaMemcpyHostToDevice));
-    dequant_to_bf16(raw.get(), r.type, l.in * l.out, tmp.as<bf16>(), nullptr);
-    size_t sf_off, amax_off;
-    qlayout(mode_, l, sf_off, amax_off);
-    char* base = static_cast<char*>(dst.get()) + b.offs[j];
-    quantize_blockscaled(mode_, tmp.as<bf16>(), l.in, l.out, l.in,
-                         {base, reinterpret_cast<uint8_t*>(base + sf_off), reinterpret_cast<float*>(base + amax_off)},
-                         nullptr);
-  }
-  MX_CUDA(cudaMemcpy(host, dst.get(), b.bytes, cudaMemcpyDeviceToHost));
+// 從映射檔案複製到鎖頁暫存；多執行緒讓頁面快取（或磁碟）讀取並行。
+void BlockStreamer::fill_stage(const Block& b, char* dst) {
+  constexpr size_t kChunk = size_t(8) << 20;
+  struct Piece {
+    const char* src;
+    char* dst;
+    size_t n;
+  };
+  std::vector<Piece> pieces;
+  for (size_t j = 0; j < b.refs.size(); j++)
+    for (size_t o = 0; o < b.refs[j]->nbytes; o += kChunk)
+      pieces.push_back({static_cast<const char*>(b.refs[j]->data) + o, dst + b.raw_offs[j] + o,
+                        std::min(kChunk, b.refs[j]->nbytes - o)});
+  const int nt = int(std::min<size_t>(4, pieces.size()));
+  std::vector<std::thread> pool;
+  for (int t = 1; t < nt; t++)
+    pool.emplace_back([&, t] {
+      for (size_t i = t; i < pieces.size(); i += nt) std::memcpy(pieces[i].dst, pieces[i].src, pieces[i].n);
+    });
+  for (size_t i = 0; i < pieces.size(); i += nt) std::memcpy(pieces[i].dst, pieces[i].src, pieces[i].n);
+  for (auto& th : pool) th.join();
 }
 
 void BlockStreamer::issue_copy(int i) {
-  int s = i % 2;
+  const int s = i % 2;
   if (slot_block_[s] == i) return;
+  const Block& b = blocks_[i];
+  // 暫存區 s 上一次的 H2D 完成後才能覆寫（通常早就完成）。
+  MX_CUDA(cudaEventSynchronize(staged_[s]));
+  fill_stage(b, static_cast<char*>(stage_[s].get()));
   // 等這個槽的上一個使用者算完再覆寫。
   MX_CUDA(cudaStreamWaitEvent(copy_, consumed_[s], 0));
-  const Block& b = blocks_[i];
-  MX_CUDA(cudaMemcpyAsync(slots_[s].get(), static_cast<char*>(host_.get()) + b.host_off, b.bytes,
-                          cudaMemcpyHostToDevice, copy_));
+  const bool quant = mode_ != QMode::BF16;
+  char* raw = static_cast<char*>(raw_[quant ? 0 : s].get());
+  MX_CUDA(cudaMemcpyAsync(raw, stage_[s].get(), b.raw_bytes, cudaMemcpyHostToDevice, copy_));
+  MX_CUDA(cudaEventRecord(staged_[s], copy_));
+  if (quant) {
+    // 原始權重 → bf16 → 區塊縮放；與 c.stream 上的計算重疊。
+    for (size_t j = 0; j < b.linears.size(); j++) {
+      const Linear& l = *b.linears[j];
+      dequant_to_bf16(raw + b.raw_offs[j], b.refs[j]->type, l.in * l.out, tmp_.as<bf16>(), copy_);
+      size_t sf_off, amax_off;
+      qlayout(mode_, l, sf_off, amax_off);
+      char* base = static_cast<char*>(q_[s].get()) + b.q_offs[j];
+      quantize_blockscaled(mode_, tmp_.as<bf16>(), l.in, l.out, l.in,
+                           {base, reinterpret_cast<uint8_t*>(base + sf_off), reinterpret_cast<float*>(base + amax_off)},
+                           copy_);
+    }
+  }
   MX_CUDA(cudaEventRecord(copied_[s], copy_));
   slot_block_[s] = i;
 }
@@ -134,15 +141,15 @@ void BlockStreamer::acquire(Ctx& c, int i) {
   MX_CHECK(c.device == dev_, "BlockStreamer：Ctx 裝置不符");
   if (last_ >= 0) MX_CUDA(cudaEventRecord(consumed_[last_ % 2], c.stream));
   issue_copy(i);
-  int s = i % 2;
+  const int s = i % 2;
   MX_CUDA(cudaStreamWaitEvent(c.stream, copied_[s], 0));
   Block& b = blocks_[i];
   for (size_t j = 0; j < b.linears.size(); j++) {
     Linear& l = *b.linears[j];
-    char* base = static_cast<char*>(slots_[s].get()) + b.offs[j];
     if (mode_ == QMode::BF16) {
-      l.w.p = base;
+      l.w.p = static_cast<char*>(raw_[s].get()) + b.raw_offs[j];
     } else {
+      char* base = static_cast<char*>(q_[s].get()) + b.q_offs[j];
       size_t sf_off, amax_off;
       qlayout(mode_, l, sf_off, amax_off);
       l.qw->m = {base, reinterpret_cast<uint8_t*>(base + sf_off), reinterpret_cast<float*>(base + amax_off)};

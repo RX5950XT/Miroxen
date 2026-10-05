@@ -20,7 +20,7 @@ class Qwen3TextEncoder {
   int64_t dim() const { return dim_; }
   int layers() const { return int(blocks_.size()); }
   size_t scratch_bytes() const;
-  size_t weight_bytes() const { return dw_.bytes() + (streamer_ ? streamer_->pinned_bytes() : 0); }
+  size_t weight_bytes() const { return dw_.bytes() + (streamer_ ? streamer_->weight_bytes() : 0); }
   bool streaming() const { return streamer_ != nullptr; }
 
  private:

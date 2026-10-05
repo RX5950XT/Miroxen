@@ -1,8 +1,9 @@
 #pragma once
-// 逐塊權重串流：每一塊（通常是一層 transformer）的線性層權重放在鎖頁主機記憶體，
-// 執行時用獨立的 copy stream 雙緩衝搬上 GPU——計算第 i 塊時預取第 i+1 塊。
-// 擴散模型每層計算時間遠大於 PCIe 搬運時間，所以串流幾乎不增加總時間，VRAM 只需兩層權重。
-// QMode 為 FP8/FP4 時，finalize 會在 GPU 上把每層轉成區塊縮放格式再存回鎖頁記憶體，之後串流的就是量化資料。
+// 逐塊權重串流：每一塊（通常是一層 transformer）的線性層權重直接從模型檔（mmap）讀，
+// 經兩份鎖頁暫存區送上 GPU 雙緩衝——計算第 i 塊時預取第 i+1 塊。
+// 不另外保留整份主機副本：鎖頁記憶體只有兩塊大小，檔案內容由作業系統的頁面快取管理（記憶體吃緊時可回收）。
+// 擴散模型每層計算時間遠大於讀取＋PCIe 搬運時間，所以串流幾乎不增加總時間，VRAM 只需兩層權重。
+// QMode 為 FP8/FP4 時，原始權重上 GPU 後在 copy stream 上反量化＋區塊縮放量化（與計算重疊）。
 #include <vector>
 
 #include "core/weights.h"
@@ -21,34 +22,34 @@ class BlockStreamer {
 
   // 依序登記每一塊包含的線性層（Linear 物件必須在 streamer 存活期間保持位址不變）。
   void add_block(const TensorStore& st, std::vector<Linear*> linears);
-  // 全部登記完後呼叫：把權重複製到鎖頁記憶體並配置兩個裝置槽。
+  // 全部登記完後呼叫：配置鎖頁暫存與裝置槽。
   void finalize();
 
   // 讓第 i 塊的 Linear::w.p（量化時是 Linear::qw）指向裝置上的資料（必要時等待搬運），並預取第 i+1 塊（循環）。
   // 呼叫前，前一塊的所有核心都必須已排入 c.stream。
   void acquire(Ctx& c, int i);
   int blocks() const { return int(blocks_.size()); }
-  size_t pinned_bytes() const { return host_.size(); }
-  size_t device_bytes() const { return 2 * slot_bytes_; }
+  size_t weight_bytes() const { return total_raw_; }  // 原始權重總量（在檔案裡，不佔鎖頁記憶體）
 
  private:
   struct Block {
     std::vector<Linear*> linears;
     std::vector<const WeightRef*> refs;
-    std::vector<size_t> offs;  // 塊內偏移（量化時是 q 的偏移，sf、amax 緊接在後）
-    size_t host_off = 0, bytes = 0;
+    std::vector<size_t> raw_offs, q_offs;  // 塊內偏移：原始資料／量化資料（sf、amax 緊接在 q 後）
+    size_t raw_bytes = 0, q_bytes = 0;
   };
   void issue_copy(int i);
-  void quantize_block(const Block& b, char* host);
+  void fill_stage(const Block& b, char* dst);
 
   int dev_;
   QMode mode_;
   std::vector<Block> blocks_;
-  PinnedBuf host_;
-  DevBuf slots_[2];
-  size_t slot_bytes_ = 0;
+  size_t total_raw_ = 0, raw_max_ = 0, q_max_ = 0, tmp_max_ = 0;
+  PinnedBuf stage_[2];
+  DevBuf raw_[2];   // BF16：計算直接讀這裡；量化模式只用 raw_[0] 當轉換來源
+  DevBuf q_[2], tmp_;  // 量化模式：轉換後的槽與 bf16 中繼
   cudaStream_t copy_ = nullptr;
-  cudaEvent_t copied_[2] = {}, consumed_[2] = {};
+  cudaEvent_t staged_[2] = {}, copied_[2] = {}, consumed_[2] = {};
   int slot_block_[2] = {-1, -1};  // 槽內（或正在搬入）的塊
   int last_ = -1;                  // 上一次 acquire 的塊
 };

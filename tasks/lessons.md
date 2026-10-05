@@ -32,3 +32,11 @@
 - 自寫小測試量指令速度時記得選對卡：CUDA 預設 device 0 是 3060 Ti（見上），在 sm_86 上跑 sm_120 cubin 會報 no kernel image。
 - FP8 注意力（SageAttention2 式）第一版 1 CTA/SM 只到 67 TFLOPS；換全速 MMA 到 82，`__launch_bounds__(256, 2)` 壓到 128 暫存器後 105。
   改 exp／int→float 轉換沒有幫助，瓶頸是 MMA 速率與佔用率。
+
+## 建置
+- 改了 class 成員（例如 BlockStreamer）後出現「invalid resource handle」、日誌數字每次不同這類記憶體被寫壞的症狀，
+  先 `cmake --build build --target clean` 再建置：曾有目標沒跟著標頭重編，新舊物件大小不一致。
+
+## 主機記憶體
+- 串流權重不要在主機留整份鎖頁副本（H3 曾鎖 30+ GB 導致系統記憶體不足被砍）：直接從 mmap 讀到兩塊鎖頁暫存即可，
+  CPU 複製與 H2D 都藏在每層計算後面；量化放到 GPU copy stream 上做。
