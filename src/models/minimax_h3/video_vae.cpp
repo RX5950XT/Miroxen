@@ -343,16 +343,18 @@ struct H3VideoVae::Impl {
       head_norm_rope(comfy?qkv:qkv+size_t(S)*2*D,S,stride,comfy?2*D:0,heads,head_dim,nullptr,eps,nullptr,nullptr,0,ROPE_NONE,v,c.stream);
       auto a=c.act.alloc_n<bf16>(size_t(S)*D),out=c.act.alloc_n<bf16>(size_t(S)*D);
       AttnParams params;params.Sq=params.Skv=S;params.Hq=params.Hkv=heads;params.D=head_dim;
-      flash_attn(q,k,v,a,params,c.stream);linear(c,b.proj,a,S,out);
-      gated_residual(x,out,S,D,{b.s1},0,c.stream);
+      flash_attn(q,k,v,a,params,c.stream);
+      auto proj=b.proj;proj.bias=nullptr;linear(c,proj,a,S,out);
+      h3v::biased_residual(x,out,b.proj.bias,b.s1,S,D,c.stream);
     }
     {
       ArenaScope scope(c.act);auto norm=c.act.alloc_n<bf16>(size_t(S)*D);
       rmsnorm_mod(x,S,D,eps,b.n2,{}, {},norm,c.stream);
       auto gu=c.act.alloc_n<bf16>(size_t(S)*2*ff),hidden=c.act.alloc_n<bf16>(size_t(S)*ff);
       auto out=c.act.alloc_n<bf16>(size_t(S)*D);
-      linear(c,b.ff1,norm,S,gu);h3v::swiglu(gu,hidden,S,ff,comfy,c.stream);linear(c,b.ff2,hidden,S,out);
-      gated_residual(x,out,S,D,{b.s2},0,c.stream);
+      auto ff1=b.ff1,ff2=b.ff2;ff1.bias=ff2.bias=nullptr;
+      linear(c,ff1,norm,S,gu);h3v::swiglu(gu,hidden,b.ff1.bias,S,ff,comfy,c.stream);linear(c,ff2,hidden,S,out);
+      h3v::biased_residual(x,out,b.ff2.bias,b.s2,S,D,c.stream);
     }
   }
   std::vector<float> decode_tile(Ctx& c,const float* z,int F,int H,int W,int start,int T,

@@ -9,7 +9,9 @@ void anchors(const bf16* projected, float* x, const float* registers,
              int patches, int dim, int nr, cudaStream_t s);
 void rope(float* cos, float* sin, int T, int H, int W, int suffix, int rot,
           float theta, cudaStream_t s);
-void swiglu(const bf16* gu, bf16* out, int rows, int f, bool gate_first, cudaStream_t s);
+void swiglu(const bf16* gu, bf16* out, const float* bias, int rows, int f, bool gate_first, cudaStream_t s);
+void biased_residual(float* x, const bf16* y, const float* bias, const float* scale,
+                     int rows, int dim, cudaStream_t s);
 void unpack(const bf16* patches, float* pixels, int T, int H, int W,
             int pt, int p, cudaStream_t s);
 void image_input(const uint8_t* rgb, bf16* out, int H, int W, int y, int x,

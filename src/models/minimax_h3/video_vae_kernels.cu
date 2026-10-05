@@ -30,15 +30,39 @@ __global__ void rope_kernel(float* cs, float* sn, int T, int H, int W, int suffi
   cs[i] = __bfloat162float(__float2bfloat16(cosf(a)));
   sn[i] = __bfloat162float(__float2bfloat16(sinf(a)));
 }
-__global__ void swiglu_kernel(const bf16* gu, bf16* out, int rows, int f, bool first) {
-  int i = blockIdx.x*blockDim.x+threadIdx.x;
-  if (i >= rows*f) return;
-  int pos = (i/f)*2*f+i%f;
-  float gate = __bfloat162float(gu[pos+(first?0:f)]);
-  float up = __bfloat162float(gu[pos+(first?f:0)]);
-  // PyTorch SiLU 先寫回 bf16，再做乘法。
-  float act = __bfloat162float(__float2bfloat16(gate/(1.f+expf(-gate))));
-  out[i] = __float2bfloat16(act*up);
+__global__ void swiglu_kernel(const bf16* gu, bf16* out, const float* bias, int f, bool first) {
+  int col = (blockIdx.y*blockDim.x+threadIdx.x)*8;
+  if (col >= f) return;
+  int pos = blockIdx.x*2*f+col, gate_col=col+(first?0:f), up_col=col+(first?f:0);
+  alignas(16) bf16 gate[8],up[8],result[8];
+  *reinterpret_cast<uint4*>(gate)=*reinterpret_cast<const uint4*>(gu+pos+(first?0:f));
+  *reinterpret_cast<uint4*>(up)=*reinterpret_cast<const uint4*>(gu+pos+(first?f:0));
+  #pragma unroll
+  for(int j=0;j<8;++j) {
+    // 保留 GEMM → bias → SiLU → 乘法各自寫回 bf16 的取整順序。
+    float g=__bfloat162float(__float2bfloat16(__bfloat162float(gate[j])+bias[gate_col+j]));
+    float u=__bfloat162float(__float2bfloat16(__bfloat162float(up[j])+bias[up_col+j]));
+    float act=__bfloat162float(__float2bfloat16(g/(1.f+expf(-g))));
+    result[j]=__float2bfloat16(act*u);
+  }
+  *reinterpret_cast<uint4*>(out+blockIdx.x*f+col)=*reinterpret_cast<const uint4*>(result);
+}
+__global__ void biased_residual_kernel(float* x,const bf16* y,const float* bias,const float* scale,int dim) {
+  int col=(blockIdx.y*blockDim.x+threadIdx.x)*4;
+  if(col>=dim)return;
+  int pos=blockIdx.x*dim+col;
+  alignas(8) bf16 values[4];
+  *reinterpret_cast<uint2*>(values)=*reinterpret_cast<const uint2*>(y+pos);
+  float4 result=*reinterpret_cast<const float4*>(x+pos);
+  const float4 b=*reinterpret_cast<const float4*>(bias+col),s=*reinterpret_cast<const float4*>(scale+col);
+  float* r=reinterpret_cast<float*>(&result);
+  const float* bs=reinterpret_cast<const float*>(&b),*sc=reinterpret_cast<const float*>(&s);
+  #pragma unroll
+  for(int j=0;j<4;++j) {
+    float v=__bfloat162float(__float2bfloat16(__bfloat162float(values[j])+bs[j]));
+    v*=sc[j];r[j]+=v;
+  }
+  *reinterpret_cast<float4*>(x+pos)=result;
 }
 __global__ void unpack_kernel(const bf16* a, float* out, int T, int H, int W, int pt, int p) {
   int64_t i = int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
@@ -125,8 +149,13 @@ void anchors(const bf16* p,float* x,const float* r,int N,int D,int nr,cudaStream
 void rope(float* cs,float* sn,int T,int H,int W,int suffix,int rot,float theta,cudaStream_t s) {
   rope_kernel<<<((T*H*W+suffix)*(rot/2)+255)/256,256,0,s>>>(cs,sn,T,H,W,suffix,rot,theta); MX_KCHECK();
 }
-void swiglu(const bf16* gu,bf16* out,int rows,int f,bool first,cudaStream_t s) {
-  swiglu_kernel<<<(rows*f+255)/256,256,0,s>>>(gu,out,rows,f,first); MX_KCHECK();
+void swiglu(const bf16* gu,bf16* out,const float* bias,int rows,int f,bool first,cudaStream_t s) {
+  MX_CHECK(gu && out && bias && rows>0 && f>0 && f%8==0,"swiglu: invalid shape or pointer");
+  swiglu_kernel<<<dim3(rows,(f/8+255)/256),256,0,s>>>(gu,out,bias,f,first); MX_KCHECK();
+}
+void biased_residual(float* x,const bf16* y,const float* bias,const float* scale,int rows,int dim,cudaStream_t s) {
+  MX_CHECK(x && y && bias && scale && rows>0 && dim>0 && dim%4==0,"biased_residual: invalid shape or pointer");
+  biased_residual_kernel<<<dim3(rows,(dim/4+255)/256),256,0,s>>>(x,y,bias,scale,dim); MX_KCHECK();
 }
 void unpack(const bf16* a,float* out,int T,int H,int W,int pt,int p,cudaStream_t s) {
   unpack_kernel<<<unsigned((int64_t(T)*pt*H*p*W*p*3+255)/256),256,0,s>>>(a,out,T,H,W,pt,p); MX_KCHECK();
