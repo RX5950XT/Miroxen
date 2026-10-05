@@ -66,6 +66,11 @@ class H3Dit {
   std::vector<Linear*> linears();
   std::vector<std::string> linear_names();
   bool resolve_lora(const std::string& name, LoraTarget& t);
+  // LoRA 改了之後呼叫：FP8/FP4 串流會在搬運時把 LoRA 併進權重，已預取的槽要重搬。
+  void invalidate_streams() {
+    st_refiner_->invalidate();
+    st_blocks_->invalidate();
+  }
 
  private:
   struct Block {

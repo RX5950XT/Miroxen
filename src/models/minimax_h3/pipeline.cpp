@@ -97,6 +97,7 @@ void H3Pipeline::apply_loras(const std::vector<LoraSpec>& loras) {
     MX_CHECK(st.applied > 0, "LoRA %s 沒有任何層對應到 MiniMax-H3", l.path.c_str());
     active_loras_.push_back(l);
   }
+  dit_->invalidate_streams();
 }
 
 VisionFeatures H3Pipeline::vision(const uint8_t* rgb0, const uint8_t* rgb1, int h, int w) {
@@ -509,6 +510,7 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
 
   // 音訊解碼 → WAV。rows：聲道優先 [2A, 32] → [2, 32, A]。
   report("decode_audio", 0, 1);
+  const auto ta0 = std::chrono::steady_clock::now();
   fs::create_directories(paths_.out_dir);
   std::string stem = (fs::path(paths_.out_dir) / strf("h3_%lld", (long long)p.seed)).string();
   {
@@ -525,6 +527,8 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
     avae_->decode(ac, dz.as<float>(), A, pcm);
     write_wav(stem + ".wav", pcm, H3AudioVae::kSampleRate);
   }
+  const auto td = std::chrono::steady_clock::now();
+  MX_INFO("H3 音訊解碼：%.1f 秒", std::chrono::duration<double>(td - ta0).count());
 
   // 影片解碼：邊解邊送 ffmpeg（rawvideo rgb24 + wav → H.264/AAC）。
   report("decode_video", 0, 1);
@@ -573,6 +577,8 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   int rc = pclose(ff);
 #endif
   MX_CHECK(rc == 0, "ffmpeg 結束代碼 %d", rc);
+  MX_INFO("H3 影片解碼＋編碼 MP4：%.1f 秒",
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count());
   VideoResult res;
   res.mp4_path = mp4;
   res.seed = p.seed;

@@ -22,6 +22,7 @@ Linear make_linear_streamed(DeviceWeights& dw, const std::string& prefix) {
 }
 
 BlockStreamer::~BlockStreamer() {
+  if (blas_) cublasDestroy(blas_);
   if (copy_) {
     cudaStreamSynchronize(copy_);
     cudaStreamDestroy(copy_);
@@ -77,6 +78,10 @@ void BlockStreamer::finalize() {
   }
   if (quant) tmp_ = DevBuf(tmp_max_, dev_);
   MX_CUDA(cudaStreamCreateWithFlags(&copy_, cudaStreamNonBlocking));
+  if (quant) {
+    MX_BLAS(cublasCreate(&blas_));
+    MX_BLAS(cublasSetStream(blas_, copy_));
+  }
   const size_t dev_bytes = raw_[0].size() + raw_[1].size() + q_[0].size() + q_[1].size() + tmp_.size();
   MX_INFO("權重串流：%zu 塊、%.2f GiB 直接讀檔（%s）、鎖頁暫存 2×%.0f MiB、GPU%d 槽 %.0f MiB", blocks_.size(),
           total_raw_ / 1073741824.0, quant ? qmode_name(mode_) : "原始格式", raw_max_ / 1048576.0, dev_,
@@ -124,6 +129,14 @@ void BlockStreamer::issue_copy(int i) {
     for (size_t j = 0; j < b.linears.size(); j++) {
       const Linear& l = *b.linears[j];
       dequant_to_bf16(raw + b.raw_offs[j], b.refs[j]->type, l.in * l.out, tmp_.as<bf16>(), copy_);
+      const float one = 1.f;
+      for (auto& d : l.loras) {  // W[out,in] += s·B·A（同 DeviceWeights::merge_loras）
+        if (d->f32) continue;
+        MX_BLAS(cublasGemmEx(blas_, CUBLAS_OP_N, CUBLAS_OP_N, int(l.in), int(d->out_len), int(d->rank), &d->scale,
+                             d->A.get(), CUDA_R_16BF, int(l.in), d->B.get(), CUDA_R_16BF, int(d->rank), &one,
+                             tmp_.as<bf16>() + d->out_off * l.in, CUDA_R_16BF, int(l.in), CUBLAS_COMPUTE_32F,
+                             CUBLAS_GEMM_DEFAULT));
+      }
       size_t sf_off, amax_off;
       qlayout(mode_, l, sf_off, amax_off);
       char* base = static_cast<char*>(q_[s].get()) + b.q_offs[j];
@@ -134,6 +147,11 @@ void BlockStreamer::issue_copy(int i) {
   }
   MX_CUDA(cudaEventRecord(copied_[s], copy_));
   slot_block_[s] = i;
+}
+
+void BlockStreamer::invalidate() {
+  if (copy_) MX_CUDA(cudaStreamSynchronize(copy_));
+  slot_block_[0] = slot_block_[1] = -1;
 }
 
 void BlockStreamer::acquire(Ctx& c, int i) {
@@ -153,6 +171,10 @@ void BlockStreamer::acquire(Ctx& c, int i) {
       size_t sf_off, amax_off;
       qlayout(mode_, l, sf_off, amax_off);
       l.qw->m = {base, reinterpret_cast<uint8_t*>(base + sf_off), reinterpret_cast<float*>(base + amax_off)};
+      // 槽內權重已含 LoRA（換 LoRA 時 invalidate 過，所以和目前的 l.loras 一致），linear() 不必再另算。
+      bool merged = false;
+      for (auto& d : l.loras) merged |= !d->f32;
+      l.qw->merged = merged;
     }
   }
   last_ = i;
