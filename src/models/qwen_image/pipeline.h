@@ -23,6 +23,7 @@ struct QwenImageDevices {
   int dit = 0;   // 主力卡
   int text = 0;  // 文字編碼器所在卡（-1 = 自動：放得下就放第二張卡）
   int vae = 0;
+  QMode compute = QMode::BF16;  // DiT 運算精度
 };
 
 class QwenImagePipeline {

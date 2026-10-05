@@ -54,6 +54,15 @@ HD int iq4(int q) {
                             1, 13, 25, 38, 53, 69, 89, 113};
   return table[q];
 }
+HD float ue4m3(uint8_t x) {  // 無號 e4m3，最高位元忽略；0x7f 視為 0（同 ggml）
+  if (x == 0x7f) return 0.f;
+  const int e = (x >> 3) & 15, m = x & 7;
+  return e == 0 ? m * 0x1p-9f : bits_float(uint32_t(e + 120) << 23 | uint32_t(m) << 20);
+}
+HD int e2m1x2(int q) {
+  const int8_t table[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+  return table[q];
+}
 HD void scale_min(const uint8_t* p, int j, int& s, int& m) {
   if (j < 4) { s = p[j] & 63; m = p[j + 4] & 63; }
   else { s = (p[j + 4] & 15) | (p[j - 4] >> 6) << 4;
@@ -64,7 +73,9 @@ template<GType T> constexpr int block_elements() {
   if constexpr (T == GType::Q2_K || T == GType::Q3_K || T == GType::Q4_K ||
                 T == GType::Q5_K || T == GType::Q6_K || T == GType::IQ4_XS) return 256;
   if constexpr (T == GType::Q4_0 || T == GType::Q4_1 || T == GType::Q5_0 ||
-                T == GType::Q5_1 || T == GType::Q8_0 || T == GType::IQ4_NL) return 32;
+                T == GType::Q5_1 || T == GType::Q8_0 || T == GType::IQ4_NL ||
+                T == GType::MXFP4) return 32;
+  if constexpr (T == GType::NVFP4) return 64;
   return 1;
 }
 template<GType T> constexpr int block_bytes() {
@@ -81,6 +92,8 @@ template<GType T> constexpr int block_bytes() {
   if constexpr (T == GType::Q5_K) return 176;
   if constexpr (T == GType::Q6_K) return 210;
   if constexpr (T == GType::IQ4_XS) return 136;
+  if constexpr (T == GType::MXFP4) return 17;
+  if constexpr (T == GType::NVFP4) return 36;
   return 1;
 }
 
@@ -127,6 +140,16 @@ template<GType T> HD float decode(const uint8_t* p, int k) {
     const int hi = (p[128 + k / 128 * 32 + l] >> (j * 2)) & 3;
     return mul(mul(half_float(p + 208), int8_t(p[192 + k / 16])), (lo | hi << 4) - 32);
   }
+  if constexpr (T == GType::MXFP4) {  // e8m0 縮放（ggml 的「半值」慣例）+ 加倍的 e2m1 表
+    const uint32_t e = p[0];
+    const float d = bits_float(e < 2 ? 0x00200000u << e : (e - 1) << 23);
+    return mul(d, e2m1x2((p[1 + k % 16] >> (k / 16 * 4)) & 15));
+  }
+  if constexpr (T == GType::NVFP4) {  // 4 個 ue4m3 縮放（×0.5）各管 16 個
+    const int s = k / 16, j = k % 16;
+    const float d = mul(ue4m3(p[s]), 0.5f);
+    return mul(d, e2m1x2((p[4 + s * 8 + j % 8] >> (j / 8 * 4)) & 15));
+  }
   if constexpr (T == GType::IQ4_XS) {
     const int j = k / 32;
     const int sc = ((p[4 + j / 2] >> (j % 2 * 4)) & 15) | ((u16(p + 2) >> (j * 2)) & 3) << 4;
@@ -157,7 +180,7 @@ template<GType T, class Out> __global__ void convert(const uint8_t* src, int64_t
 
 #define MX_DEQUANT_TYPES(X) \
   X(F32) X(F16) X(BF16) X(F8_E4M3) X(F8_E5M2) X(Q4_0) X(Q4_1) X(Q5_0) X(Q5_1) \
-  X(Q8_0) X(Q2_K) X(Q3_K) X(Q4_K) X(Q5_K) X(Q6_K) X(IQ4_NL) X(IQ4_XS)
+  X(Q8_0) X(Q2_K) X(Q3_K) X(Q4_K) X(Q5_K) X(Q6_K) X(IQ4_NL) X(IQ4_XS) X(MXFP4) X(NVFP4)
 
 void validate(const void* src, GType t, int64_t n, const void* dst) {
   MX_CHECK(dequant_supported(t), "Unsupported dequantization type %u", unsigned(t));

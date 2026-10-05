@@ -2,6 +2,7 @@
 // 逐塊權重串流：每一塊（通常是一層 transformer）的線性層權重放在鎖頁主機記憶體，
 // 執行時用獨立的 copy stream 雙緩衝搬上 GPU——計算第 i 塊時預取第 i+1 塊。
 // 擴散模型每層計算時間遠大於 PCIe 搬運時間，所以串流幾乎不增加總時間，VRAM 只需兩層權重。
+// QMode 為 FP8/FP4 時，finalize 會在 GPU 上把每層轉成區塊縮放格式再存回鎖頁記憶體，之後串流的就是量化資料。
 #include <vector>
 
 #include "core/weights.h"
@@ -13,7 +14,7 @@ Linear make_linear_streamed(DeviceWeights& dw, const std::string& prefix);
 
 class BlockStreamer {
  public:
-  explicit BlockStreamer(int device) : dev_(device) {}
+  explicit BlockStreamer(int device, QMode mode = QMode::BF16) : dev_(device), mode_(mode) {}
   ~BlockStreamer();
   BlockStreamer(const BlockStreamer&) = delete;
   BlockStreamer& operator=(const BlockStreamer&) = delete;
@@ -23,7 +24,7 @@ class BlockStreamer {
   // 全部登記完後呼叫：把權重複製到鎖頁記憶體並配置兩個裝置槽。
   void finalize();
 
-  // 讓第 i 塊的 Linear::w.p 指向裝置上的資料（必要時等待搬運），並預取第 i+1 塊（循環）。
+  // 讓第 i 塊的 Linear::w.p（量化時是 Linear::qw）指向裝置上的資料（必要時等待搬運），並預取第 i+1 塊（循環）。
   // 呼叫前，前一塊的所有核心都必須已排入 c.stream。
   void acquire(Ctx& c, int i);
   int blocks() const { return int(blocks_.size()); }
@@ -34,12 +35,14 @@ class BlockStreamer {
   struct Block {
     std::vector<Linear*> linears;
     std::vector<const WeightRef*> refs;
-    std::vector<size_t> offs;  // 塊內偏移
+    std::vector<size_t> offs;  // 塊內偏移（量化時是 q 的偏移，sf、amax 緊接在後）
     size_t host_off = 0, bytes = 0;
   };
   void issue_copy(int i);
+  void quantize_block(const Block& b, char* host);
 
   int dev_;
+  QMode mode_;
   std::vector<Block> blocks_;
   PinnedBuf host_;
   DevBuf slots_[2];

@@ -13,7 +13,18 @@ Ctx::Ctx(int dev, size_t act_bytes, size_t scratch_bytes) : device(dev) {
   scratch = DevBuf(scratch_bytes, dev);
 }
 
+void Ctx::ensure_lt() {
+  if (lt) return;
+  use();
+  MX_BLAS(cublasLtCreate(&lt));
+  lt_ws = DevBuf(size_t(32) << 20, device);
+  lt_scalars = DevBuf(4 * sizeof(float), device);
+  const float init[4] = {1.f, 1.f, 0.f, 0.f};  // [alpha（每次覆寫）, 1, 0, -]
+  MX_CUDA(cudaMemcpy(lt_scalars.get(), init, sizeof(init), cudaMemcpyHostToDevice));
+}
+
 Ctx::~Ctx() {
+  if (lt) cublasLtDestroy(lt);
   if (blas) cublasDestroy(blas);
   if (stream) cudaStreamDestroy(stream);
 }

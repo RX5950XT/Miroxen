@@ -52,7 +52,7 @@ H3Pipeline::H3Pipeline(const H3Paths& p, H3Devices d) : paths_(p), dev_(d) {
   avae_st_.add_file(p.audio_vae);
   te_ = std::make_unique<Qwen3TextEncoder>(te_st_, dev_.text, /*stream=*/true);
   te_ctx_ = std::make_unique<Ctx>(dev_.text, size_t(512) << 20, te_->scratch_bytes());
-  dit_ = std::make_unique<H3Dit>(dit_st_, dev_.dit);
+  dit_ = std::make_unique<H3Dit>(dit_st_, dev_.dit, 0, d.compute);
   vvae_ = std::make_unique<H3VideoVae>(vvae_st_, dev_.video_vae);
   avae_ = std::make_unique<H3AudioVae>(avae_st_, dev_.audio_vae);
   avae_ctx_ = std::make_unique<Ctx>(dev_.audio_vae, size_t(1) << 30, 0);
@@ -63,8 +63,9 @@ H3Pipeline::H3Pipeline(const H3Paths& p, H3Devices d) : paths_(p), dev_(d) {
 H3Pipeline::~H3Pipeline() = default;
 
 std::string H3Pipeline::describe() const {
-  return strf("DiT %s @GPU%d（串流）· TE %d 層 @GPU%d（串流）",
-              gtype_name(dit_st_.get("blocks.0.attn.qkv_proj.weight").type), dev_.dit, te_->layers(), dev_.text);
+  return strf("DiT %s/%s @GPU%d（串流）· TE %d 層 @GPU%d（串流）",
+              gtype_name(dit_st_.get("blocks.0.attn.qkv_proj.weight").type), qmode_name(dit_->compute()), dev_.dit,
+              te_->layers(), dev_.text);
 }
 
 void H3Pipeline::apply_loras(const std::vector<LoraSpec>& loras) {

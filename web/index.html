@@ -53,6 +53,15 @@
             <button type="button" id="randomize">隨機</button>
           </span>
         </label>
+        <label class="field wide">運算精度
+          <select id="compute" aria-describedby="compute-help">
+            <option value="">伺服器預設</option>
+            <option value="bf16">bf16（最準）</option>
+            <option value="fp8">fp8（約快 2 倍）</option>
+            <option value="fp4">fp4（最快）</option>
+          </select>
+          <span id="compute-help" class="help">fp8／fp4 需要 RTX 50 系列；切換時會重新載入模型。</span>
+        </label>
       </div>
 
       <div id="frame-files" class="frame-files" hidden>

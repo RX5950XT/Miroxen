@@ -216,6 +216,11 @@ void test_validation(httplib::Client& cli) {
   expect_code(post_json(cli, "/v1/images/generations", steps), 400, "invalid_steps");
   steps["steps"] = 201;
   expect_code(post_json(cli, "/v1/images/generations", steps), 400, "invalid_steps");
+  auto compute = image_body();
+  compute["compute"] = "int8";
+  expect_code(post_json(cli, "/v1/images/generations", compute), 400, "invalid_compute");
+  compute["compute"] = 4;
+  expect_code(post_json(cli, "/v1/images/generations", compute), 400, "invalid_compute");
   auto n = image_body();
   n["n"] = 2;
   expect_code(post_json(cli, "/v1/images/generations", n), 400, "invalid_n");

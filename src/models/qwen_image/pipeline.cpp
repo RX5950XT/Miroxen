@@ -50,13 +50,14 @@ QwenImagePipeline::QwenImagePipeline(const QwenImagePaths& p, QwenImageDevices d
 
   te_ = std::make_unique<Qwen3TextEncoder>(te_st_, dev_.text);
   te_ctx_ = std::make_unique<Ctx>(dev_.text, size_t(512) << 20, te_->scratch_bytes() * 2);
-  dit_ = std::make_unique<QwenImageDit>(dit_st_, dev_.dit);
+  dit_ = std::make_unique<QwenImageDit>(dit_st_, dev_.dit, d.compute);
   vae_ = std::make_unique<QwenImageVae>(vae_st_, dev_.vae);
 
   // 最大解析度 2752×1536（16512 token）+ 2048 文字 token 的啟用值上限。
   const auto& c = dit_->cfg();
   const int64_t rows = 16512 + 2048;
   size_t act = size_t(rows) * (c.dim * 4 + 5 * c.dim * 2 + 3 * c.ffn * 2) + (size_t(64) << 20);
+  if (dit_->compute() != QMode::BF16) act += size_t(rows) * c.ffn * 9 / 8;  // 啟用值量化暫存
   dit_ctx_ = std::make_unique<Ctx>(dev_.dit, act, dit_->scratch_bytes());
   vae_ctx_ = dev_.vae == dev_.dit
                  ? nullptr
@@ -71,8 +72,8 @@ QwenImagePipeline::QwenImagePipeline(const QwenImagePaths& p, QwenImageDevices d
 QwenImagePipeline::~QwenImagePipeline() = default;
 
 std::string QwenImagePipeline::describe() const {
-  return strf("DiT %s @GPU%d (%.1f GiB) · TE %d 層 @GPU%d (%.1f GiB) · VAE @GPU%d",
-              gtype_name(dit_st_.get("transformer_blocks.0.attn.to_q.weight").type), dev_.dit,
+  return strf("DiT %s/%s @GPU%d (%.1f GiB) · TE %d 層 @GPU%d (%.1f GiB) · VAE @GPU%d",
+              gtype_name(dit_st_.get("transformer_blocks.0.attn.to_q.weight").type), qmode_name(dit_->compute()), dev_.dit,
               dit_->weight_bytes() / 1073741824.0, te_->layers(), dev_.text,
               te_->weight_bytes() / 1073741824.0, dev_.vae);
 }

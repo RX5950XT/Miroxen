@@ -32,7 +32,9 @@ struct H3Seq {
 class H3Dit {
  public:
   // max_layers：只載入前 N 層（除錯／數值比對用；0 = 全部）。
-  H3Dit(const TensorStore& st, int device, int max_layers = 0);
+  // compute：50 層主幹與 refiner 的大矩陣運算精度（FP8/FP4 需 sm_100+，否則退回 bf16）。
+  H3Dit(const TensorStore& st, int device, int max_layers = 0, QMode compute = QMode::BF16);
+  QMode compute() const { return compute_; }
   int64_t dim() const { return dim_; }
   int64_t video_in() const { return video_in_.in; }  // 96 = 24×1×2×2
   int64_t audio_in() const { return audio_in_.in; }  // 32
@@ -62,6 +64,7 @@ class H3Dit {
   DeviceWeights dw_;
   int64_t dim_ = 0, ffn_ = 0, inner_ = 0;
   int heads_ = 56, head_dim_ = 128, rot_ = 96;
+  QMode compute_ = QMode::BF16;
   float eps_ = 1e-5f;
   Linear video_in_, audio_in_, cond_proj_, final_adaln_, video_out_, audio_out_;
   const float* final_norm_ = nullptr;

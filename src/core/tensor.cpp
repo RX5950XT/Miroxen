@@ -64,6 +64,7 @@ static const TypeInfo kTypes[] = {
     {GType::BF16, "BF16", 1, 2},        {GType::F8_E4M3, "F8_E4M3", 1, 1},
     {GType::F8_E5M2, "F8_E5M2", 1, 1},  {GType::U8, "U8", 1, 1},
     {GType::BOOL, "BOOL", 1, 1},
+    {GType::MXFP4, "MXFP4", 32, 17},   {GType::NVFP4, "NVFP4", 64, 36},
 };
 
 static const TypeInfo& info(GType t) {

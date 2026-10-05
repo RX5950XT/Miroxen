@@ -1,5 +1,6 @@
 #pragma once
 // 單一 GPU 的執行環境：stream、cuBLAS、啟用值 Arena、權重反量化暫存。
+#include <cublasLt.h>
 #include <cublas_v2.h>
 
 #include <memory>
@@ -29,6 +30,10 @@ class Ctx {
   cublasHandle_t blas = nullptr;
   Arena act;
   DevBuf scratch;
+  // 區塊縮放 GEMM（kernels/blockscale）用；第一次用到才建立。
+  cublasLtHandle_t lt = nullptr;
+  DevBuf lt_ws, lt_scalars;
+  void ensure_lt();
 
   void sync() const { MX_CUDA(cudaStreamSynchronize(stream)); }
   // 切換目前執行緒的裝置到本 Ctx。

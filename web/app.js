@@ -531,6 +531,8 @@ async function onSubmit(ev) {
     }
     const loras = selectedLoras();
     if (loras.length) body.loras = loras;
+    const compute = $("compute").value;
+    if (compute) body.compute = compute;
     const job = await api("/v1/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

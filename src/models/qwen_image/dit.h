@@ -26,7 +26,9 @@ struct QwenImageSeq {
 
 class QwenImageDit {
  public:
-  QwenImageDit(const TensorStore& st, int device);
+  // compute：區塊內大矩陣的運算精度（FP8/FP4 需 sm_100+，不支援時退回 bf16）。
+  QwenImageDit(const TensorStore& st, int device, QMode compute = QMode::BF16);
+  QMode compute() const { return compute_; }
   const QwenImageDitConfig& cfg() const { return cfg_; }
 
   // 準備序列：txt 為文字編碼器輸出 [T, ctx_dim]（bf16，裝置）。
@@ -52,6 +54,7 @@ class QwenImageDit {
                  const float* mod);
 
   QwenImageDitConfig cfg_;
+  QMode compute_ = QMode::BF16;
   DeviceWeights dw_;
   Linear img_in_, txt_in1_, txt_in2_, t1_, t2_, modulation_, norm_out_, proj_out_;
   DevBuf txt_norm_w_;  // zero-centered → 已加 1

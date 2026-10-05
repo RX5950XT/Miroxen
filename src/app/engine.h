@@ -23,6 +23,7 @@ struct ImageRequest {
   int64_t seed = -1;            // -1 表示隨機
   std::vector<std::string> ref_images;  // 編輯用參考圖（檔案路徑，PNG/JPG）
   std::vector<LoraSpec> loras;
+  std::string compute;          // DiT 運算精度 "bf16"/"fp8"/"fp4"；空 = 引擎預設
 };
 
 struct VideoRequest {
@@ -33,6 +34,7 @@ struct VideoRequest {
   int64_t seed = -1;
   std::string first_frame, last_frame;  // 選填：首／尾幀圖片路徑
   std::vector<LoraSpec> loras;
+  std::string compute;          // 同 ImageRequest::compute
 };
 
 struct Progress {

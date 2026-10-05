@@ -15,6 +15,7 @@ enum class GType : uint32_t {
   Q2_K = 10, Q3_K = 11, Q4_K = 12, Q5_K = 13, Q6_K = 14, Q8_K = 15,
   IQ2_XXS = 16, IQ2_XS = 17, IQ3_XXS = 18, IQ1_S = 19, IQ4_NL = 20, IQ3_S = 21, IQ2_S = 22,
   IQ4_XS = 23, I8 = 24, I16 = 25, I32 = 26, I64 = 27, F64 = 28, IQ1_M = 29, BF16 = 30,
+  MXFP4 = 39, NVFP4 = 40,
   // ggml 沒有的型別放在 1000 以後（safetensors 用）。
   F8_E4M3 = 1000, F8_E5M2 = 1001, U8 = 1002, BOOL = 1003,
 };

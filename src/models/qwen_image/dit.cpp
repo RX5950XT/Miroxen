@@ -11,7 +11,12 @@ namespace mx {
 
 static float round_bf16(float v) { return __bfloat162float(__float2bfloat16(v)); }
 
-QwenImageDit::QwenImageDit(const TensorStore& st, int device) : dw_(st, device) {
+QwenImageDit::QwenImageDit(const TensorStore& st, int device, QMode compute) : dw_(st, device) {
+  if (!qmode_supported(compute, device)) {
+    MX_INFO("GPU%d 不支援 %s 運算，DiT 改用 bf16", device, qmode_name(compute));
+    compute = QMode::BF16;
+  }
+  compute_ = compute;
   int n = 0;
   while (st.has("transformer_blocks." + std::to_string(n) + ".attn.to_q.weight")) n++;
   cfg_.layers = n;
@@ -48,11 +53,12 @@ QwenImageDit::QwenImageDit(const TensorStore& st, int device) : dw_(st, device) 
     b.out = make_linear(dw_, p + "img_mlp.out");
     b.norm_q = dw_.f32(p + "attn.norm_q.weight");
     b.norm_k = dw_.f32(p + "attn.norm_k.weight");
+    for (Linear* l : {&b.q, &b.k, &b.v, &b.o, &b.gate_up, &b.out}) dw_.quantize(*l, compute);
     blocks_.push_back(b);
   }
   cfg_.ffn = blocks_[0].out.in;
-  MX_INFO("Qwen-Image DiT：%d 層、dim %lld、權重 %.2f GiB（%s）", n, (long long)cfg_.dim,
-          dw_.bytes() / 1073741824.0, gtype_name(blocks_[0].q.w.type));
+  MX_INFO("Qwen-Image DiT：%d 層、dim %lld、權重 %.2f GiB（%s，運算 %s）", n, (long long)cfg_.dim,
+          dw_.bytes() / 1073741824.0, gtype_name(blocks_[0].q.w.type), qmode_name(compute_));
 }
 
 size_t QwenImageDit::scratch_bytes() const {
@@ -202,12 +208,14 @@ void QwenImageDit::run_block(Ctx& c, QwenImageSeq& seq, int li, float* x, int64_
   const float* sn = seq.sin.as<float>() + row0 * (D / 2);
 
   layernorm_mod(x, rows, dim, cfg_.eps, rm(0), {}, h, c.stream);
-  linear(c, b.q, h, rows, tmp);
-  head_norm_rope(tmp, rows, dim, 0, H, D, b.norm_q, cfg_.eps, cs, sn, D, ROPE_INTERLEAVED, q, c.stream);
-  linear(c, b.k, h, rows, tmp);
-  head_norm_rope(tmp, rows, dim, 0, H, D, b.norm_k, cfg_.eps, cs, sn, D, ROPE_INTERLEAVED,
-                 k + row0 * dim, c.stream);
-  linear(c, b.v, h, rows, v + row0 * dim);
+  {
+    ArenaScope s2(c.act);
+    bf16* kt = c.act.alloc_n<bf16>(rows * dim);
+    linear_multi(c, h, rows, {{&b.q, tmp}, {&b.k, kt}, {&b.v, v + row0 * dim}});
+    head_norm_rope(tmp, rows, dim, 0, H, D, b.norm_q, cfg_.eps, cs, sn, D, ROPE_INTERLEAVED, q, c.stream);
+    head_norm_rope(kt, rows, dim, 0, H, D, b.norm_k, cfg_.eps, cs, sn, D, ROPE_INTERLEAVED, k + row0 * dim,
+                   c.stream);
+  }
   const size_t pre_bytes = size_t(T) * dim * sizeof(bf16);
   if (prefill) {
     MX_CUDA(cudaMemcpyAsync(seq.kcache[li].get(), k, pre_bytes, cudaMemcpyDeviceToDevice, c.stream));

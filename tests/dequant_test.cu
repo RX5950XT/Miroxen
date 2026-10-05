@@ -11,7 +11,7 @@ using namespace mx;
 namespace {
 const GType types[] = {GType::F32, GType::F16, GType::BF16, GType::F8_E4M3, GType::F8_E5M2,
   GType::Q4_0, GType::Q4_1, GType::Q5_0, GType::Q5_1, GType::Q8_0, GType::Q2_K, GType::Q3_K,
-  GType::Q4_K, GType::Q5_K, GType::Q6_K, GType::IQ4_NL, GType::IQ4_XS};
+  GType::Q4_K, GType::Q5_K, GType::Q6_K, GType::IQ4_NL, GType::IQ4_XS, GType::MXFP4, GType::NVFP4};
 
 bool same(float a, float b) {
   return (std::isnan(a) && std::isnan(b)) || std::memcmp(&a, &b, sizeof(float)) == 0;
@@ -107,7 +107,7 @@ void reference_vectors(int dev) {
     elements += n;
   }
   MX_CHECK(f.peek() == EOF, "Reference vector trailing data");
-  std::printf("GPU%d Python/CPU/GPU reference: %u formats, %zu elements PASS (gguf-py 15, FP8 table 2)\n", dev, count, elements);
+  std::printf("GPU%d Python/CPU/GPU reference: %u formats, %zu elements PASS (gguf-py 17, FP8 table 2)\n", dev, count, elements);
 }
 
 template<class F> void rejects(F f) {

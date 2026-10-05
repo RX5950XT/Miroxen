@@ -8,6 +8,7 @@
 
 #include "core/ctx.h"
 #include "core/model_file.h"
+#include "kernels/blockscale.h"
 
 namespace mx {
 
@@ -24,12 +25,16 @@ struct DevTensor {
 
 // 依名稱把原始（可能是量化）權重搬上指定 GPU，重複呼叫會重用。
 // ponytail: 整個模型常駐；VRAM 不夠的大模型之後改成逐層串流。
+struct Linear;
+
 class DeviceWeights {
  public:
   DeviceWeights(const TensorStore& st, int device) : st_(st), dev_(device) {}
   const DevTensor& raw(const std::string& name);
   const float* f32(const std::string& name);      // 小張量（norm、bias）轉 f32 常駐
   const float* f32_or_null(const std::string& name) { return st_.has(name) ? f32(name) : nullptr; }
+  // 把 Linear 權重轉成區塊縮放格式（FP8/FP4，載入時一次）並釋放原始權重。BF16 不動作。
+  void quantize(Linear& l, QMode m);
   const TensorStore& store() const { return st_; }
   size_t bytes() const { return bytes_; }
   int device() const { return dev_; }
@@ -49,13 +54,22 @@ struct LoraDelta {
   float scale = 1.f;
 };
 
+// 區塊縮放（FP8/FP4）權重，見 kernels/blockscale.h。
+struct QWeight {
+  QMode mode = QMode::BF16;
+  QMat m;              // 指向下面擁有的緩衝，或串流時由 BlockStreamer 指向裝置槽
+  DevBuf q, sf, amax;  // 常駐時擁有
+  QMat mat() const { return m; }
+};
+
 struct Linear {
   std::string name;
-  DevTensor w;                 // [out, in]
+  DevTensor w;                 // [out, in]；量化成 qw 後 w.p 為空（型別與形狀保留）
   const float* bias = nullptr; // [out]
   int64_t in = 0, out = 0;
   std::vector<std::shared_ptr<LoraDelta>> loras;
-  explicit operator bool() const { return w.p != nullptr; }
+  std::shared_ptr<QWeight> qw;  // 非空時走區塊縮放 GEMM
+  explicit operator bool() const { return w.p != nullptr || qw != nullptr; }
 };
 
 // prefix 例如 "transformer_blocks.0.attn.to_q"，讀 prefix.weight（與 prefix.bias，若有）。
@@ -65,6 +79,13 @@ size_t linear_scratch_bytes(const Linear& l);
 
 // y[M, out]（列距 ldy，0 表示 out）= x[M, in] · Wᵀ + b + LoRA。bf16 輸入輸出、f32 累加。
 void linear(Ctx& c, const Linear& l, const bf16* x, int64_t M, bf16* y, int64_t ldy = 0);
+// 同一個輸入接多個線性層（例如 q/k/v）：FP8/FP4 時啟用值只量化一次。
+struct LinearOut {
+  const Linear* l;
+  bf16* y;
+  int64_t ldy = 0;
+};
+void linear_multi(Ctx& c, const bf16* x, int64_t M, std::initializer_list<LinearOut> outs);
 // 精度敏感的小層（時間嵌入、調變、輸出頭）：全程 f32。
 void linear_f32(Ctx& c, const Linear& l, const float* x, int64_t M, float* y);
 

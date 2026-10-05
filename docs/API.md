@@ -28,7 +28,7 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 | 500 | 引擎失敗 |
 | 503 | 伺服器正在停止，同步請求還沒完成 |
 
-常見 `code`：`invalid_json`、`missing_field`、`missing_model`、`model_not_found`、`model_kind`、`model_not_loaded`、`empty_prompt`、`prompt_too_long`、`invalid_size`、`invalid_steps`、`invalid_n`、`invalid_cfg`、`invalid_frames`、`invalid_format`、`invalid_type`、`invalid_lora`、`lora_not_found`、`invalid_image`、`unauthorized`、`payload_too_large`、`job_not_found`、`not_found`、`cancelled`、`engine_error`、`shutting_down`。
+常見 `code`：`invalid_json`、`missing_field`、`missing_model`、`model_not_found`、`model_kind`、`model_not_loaded`、`empty_prompt`、`prompt_too_long`、`invalid_size`、`invalid_steps`、`invalid_n`、`invalid_cfg`、`invalid_frames`、`invalid_format`、`invalid_compute`、`invalid_type`、`invalid_lora`、`lora_not_found`、`invalid_image`、`unauthorized`、`payload_too_large`、`job_not_found`、`not_found`、`cancelled`、`engine_error`、`shutting_down`。
 
 每一筆請求在紀錄裡留一行：方法、路徑、狀態碼。
 
@@ -69,6 +69,8 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 `images`、`first_frame`、`last_frame` 是 base64，或 `data:image/...;base64,...`。內容必須是能解出來的 PNG 或 JPEG。參考圖最多 10 張，會先存到 `out_dir/tmp`，工作結束後刪除。影片的首幀、尾幀各一張，可省略。
 
 影片幀數欄位是 `num_frames`（也接受 `frames`），5 到 361，預設 56。
+
+`compute` 是 DiT 的運算精度，可省略（用伺服器啟動時的 `--compute`，預設 `fp8`）：`bf16`（最準）、`fp8`（MXFP8，約快 2 倍、畫質幾乎不變）、`fp4`（NVFP4，最快）。`fp8`／`fp4` 需要 Blackwell 以上的顯卡，不支援時自動退回 `bf16`。和目前載入的精度不同時會重新載入模型（Qwen-Image 約 10 秒、H3 約 40 秒）。
 
 ## 圖像
 

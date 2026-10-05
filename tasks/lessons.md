@@ -15,3 +15,13 @@
 - Write 工具會寫 CRLF；倉庫已用 .gitattributes 強制 LF。Bash heredoc 裡的 `\n` 會被轉成真的換行，
   需要字面反斜線時用 `chr(92)` 或直接用 Edit 工具。
 - CUDA 預設把 SM 多的 3060 Ti 排成 device 0；程式啟動時強制 `CUDA_DEVICE_ORDER=PCI_BUS_ID`。
+
+## 區塊縮放 GEMM（FP8／FP4，2026-10-05）
+- cuBLASLt 的 `VEC32_UE8M0`（MXFP8）與 `VEC16_UE4M3`（NVFP4）在 sm_120 可用；`OUTER_VEC`、128 區塊縮放不行。
+- 縮放張量要照 128×4 交錯排列，而且補齊的欄／列 cuBLASLt 也會讀：沒清零時 0xff 在 ue8m0 是 NaN（K 不是 128 倍數時才出現）。
+- `__nv_cvt_float2_to_fp4x2` 的硬體指令只在 `sm_120a` 這類架構專屬目標才會產生，通用 sm_120 會退回軟體模擬（慢 2 倍以上）。
+- 驗證排列：把量化結果在主機端照格式解回 f32 做 GEMM 比對，排列錯會直接對不上（tests/blockscale_test.cpp）。
+
+## nvcc 與中文字串
+- `.cu` 檔的 `MX_CHECK` 訊息含全形字元會被 nvcc 前端讀壞（missing closing quote），`.cu` 一律用英文訊息；
+  測試若要中文訊息就寫成 `.cpp`。

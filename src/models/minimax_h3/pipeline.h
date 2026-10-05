@@ -21,6 +21,7 @@ struct H3Paths {
 
 struct H3Devices {
   int dit = 0, text = -1, video_vae = 0, audio_vae = -1;  // -1 = 有第二張卡就用第二張
+  QMode compute = QMode::BF16;                            // DiT 運算精度
 };
 
 // 打包序列版面（[文字 | 條件幀 | 音訊 | 影片]）。

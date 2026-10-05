@@ -43,6 +43,31 @@ const float* DeviceWeights::f32(const std::string& name) {
   return (f32_[name] = std::move(out)).as<float>();
 }
 
+void DeviceWeights::quantize(Linear& l, QMode m) {
+  if (m == QMode::BF16 || l.qw || !l.w.p) return;
+  MX_CHECK(l.in % 32 == 0, "%s：輸入維度 %lld 不是 32 的倍數，無法量化成 %s", l.name.c_str(), (long long)l.in,
+           qmode_name(m));
+  MX_CUDA(cudaSetDevice(dev_));
+  DevBuf tmp(size_t(l.in) * l.out * sizeof(bf16), dev_);
+  dequant_to_bf16(l.w.p, l.w.type, l.in * l.out, tmp.as<bf16>(), nullptr);
+  auto q = std::make_shared<QWeight>();
+  q->mode = m;
+  q->q = DevBuf(qdata_bytes(m, l.out, l.in), dev_);
+  q->sf = DevBuf(qscale_bytes(m, l.out, l.in), dev_);
+  q->amax = DevBuf(sizeof(float), dev_);
+  q->m = {q->q.get(), q->sf.as<uint8_t>(), q->amax.as<float>()};
+  quantize_blockscaled(m, tmp.as<bf16>(), l.in, l.out, l.in, q->mat(), nullptr);
+  MX_CUDA(cudaDeviceSynchronize());
+  bytes_ += q->q.size() + q->sf.size();
+  auto it = raw_.find(l.name + ".weight");
+  if (it != raw_.end()) {
+    bytes_ -= it->second.first.size();
+    raw_.erase(it);
+  }
+  l.w.p = nullptr;
+  l.qw = std::move(q);
+}
+
 Linear make_linear(DeviceWeights& dw, const std::string& prefix) {
   Linear l;
   l.name = prefix;
@@ -54,7 +79,7 @@ Linear make_linear(DeviceWeights& dw, const std::string& prefix) {
   return l;
 }
 
-size_t linear_scratch_bytes(const Linear& l) { return size_t(l.in) * l.out * sizeof(float); }
+size_t linear_scratch_bytes(const Linear& l) { return l.qw ? 0 : size_t(l.in) * l.out * sizeof(float); }
 
 static const bf16* weight_bf16(Ctx& c, const Linear& l) {
   if (l.w.type == GType::BF16) return static_cast<const bf16*>(l.w.p);
@@ -65,11 +90,12 @@ static const bf16* weight_bf16(Ctx& c, const Linear& l) {
   return c.scratch.as<bf16>();
 }
 
-void linear(Ctx& c, const Linear& l, const bf16* x, int64_t M, bf16* y, int64_t ldy) {
-  if (M == 0) return;
+// xq：已量化的 x（l 有 qw 時必須提供）。
+static void linear_one(Ctx& c, const Linear& l, const bf16* x, const QMat* xq, int64_t M, bf16* y,
+                       int64_t ldy) {
   if (!ldy) ldy = l.out;
-  const bf16* w = weight_bf16(c, l);
-  gemm_bf16(c, x, l.in, w, l.in, y, false, ldy, M, l.out, l.in);
+  if (l.qw) gemm_blockscaled(c, l.qw->mode, l.qw->mat(), *xq, y, ldy, M, l.out, l.in);
+  else gemm_bf16(c, x, l.in, weight_bf16(c, l), l.in, y, false, ldy, M, l.out, l.in);
   if (l.bias) {
     MX_CHECK(ldy == l.out, "%s：有 bias 時不支援自訂列距", l.name.c_str());
     add_bias_bf16(y, l.bias, M, l.out, c.stream);
@@ -83,8 +109,33 @@ void linear(Ctx& c, const Linear& l, const bf16* x, int64_t M, bf16* y, int64_t 
   }
 }
 
+void linear_multi(Ctx& c, const bf16* x, int64_t M, std::initializer_list<LinearOut> outs) {
+  if (M == 0) return;
+  const QWeight* qw = nullptr;
+  for (auto& o : outs) {
+    if (!o.l->qw) continue;
+    MX_CHECK(!qw || (qw->mode == o.l->qw->mode && o.l->in == outs.begin()->l->in), "%s：量化模式或輸入維度不一致",
+             o.l->name.c_str());
+    qw = o.l->qw.get();
+  }
+  ArenaScope sc(c.act);
+  QMat xq;
+  if (qw) {
+    const int64_t K = outs.begin()->l->in;
+    xq = {c.act.alloc(qdata_bytes(qw->mode, M, K)), c.act.alloc_n<uint8_t>(qscale_bytes(qw->mode, M, K)),
+          c.act.alloc_n<float>(1)};
+    quantize_blockscaled(qw->mode, x, K, M, K, xq, c.stream);
+  }
+  for (auto& o : outs) linear_one(c, *o.l, x, &xq, M, o.y, o.ldy);
+}
+
+void linear(Ctx& c, const Linear& l, const bf16* x, int64_t M, bf16* y, int64_t ldy) {
+  linear_multi(c, x, M, {{&l, y, ldy}});
+}
+
 void linear_f32(Ctx& c, const Linear& l, const float* x, int64_t M, float* y) {
   if (M == 0) return;
+  MX_CHECK(!l.qw, "%s：f32 路徑不支援量化權重", l.name.c_str());
   const float* w;
   if (l.w.type == GType::F32) {
     w = static_cast<const float*>(l.w.p);

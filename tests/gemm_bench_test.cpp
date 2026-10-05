@@ -99,9 +99,11 @@ int main() {
         DevBuf sa(size_t(N) * K / 64 * 4 + 4096, d), sb(size_t(M) * K / 64 * 4 + 4096, d);
         MX_CUDA(cudaMemset(sa.get(), 0, sa.size()));
         MX_CUDA(cudaMemset(sb.get(), 0, sb.size()));
-        struct SM { const char* name; int mode; };
-        for (SM sm : {SM{"FP8 外積縮放(OUTER_VEC)", 3}, SM{"FP8 1x128 區塊縮放     ", 4}, SM{"FP8 128x128 區塊縮放   ", 5}}) {
-          double tf = bench(lt, s, CUDA_R_8F_E4M3, CUDA_R_16BF, CUBLAS_COMPUTE_32F, CUDA_R_32F, M, N, K, A.get(), B.get(),
+        struct SM { const char* name; int mode; cudaDataType_t ab; };
+        for (SM sm : {SM{"FP8 外積縮放(OUTER_VEC)", 3, CUDA_R_8F_E4M3}, SM{"FP8 1x128 區塊縮放     ", 4, CUDA_R_8F_E4M3},
+                      SM{"FP8 128x128 區塊縮放   ", 5, CUDA_R_8F_E4M3}, SM{"MXFP8 (VEC32_UE8M0)   ", 2, CUDA_R_8F_E4M3},
+                      SM{"NVFP4 (VEC16_UE4M3)   ", 1, CUDA_R_4F_E2M1}}) {
+          double tf = bench(lt, s, sm.ab, CUDA_R_16BF, CUBLAS_COMPUTE_32F, CUDA_R_32F, M, N, K, A.get(), B.get(),
                             C.get(), ws.get(), ws.size(), sm.mode, sa.get(), sb.get());
           if (tf < 0) std::printf("  %s 不支援\n", sm.name);
           else std::printf("  %s %7.1f TFLOPS\n", sm.name, tf);

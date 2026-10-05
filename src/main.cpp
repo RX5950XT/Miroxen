@@ -3,6 +3,7 @@
 //   miroxen video  -p "prompt" [-W 864 -H 480] [--frames 56] [--steps 30]
 //   miroxen serve  [--port 8188] [--host 127.0.0.1] [--api-key KEY] [--fake]
 // 模型路徑預設在 models/ 底下，可用 --qi-dit / --qi-te / --qi-vae / --qi-tok 覆寫。
+// --compute bf16|fp8|fp4：DiT 運算精度（fp8/fp4 用 Blackwell 區塊縮放 tensor core）。
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -58,6 +59,7 @@ EngineConfig engine_config(const Args& a) {
   c.h3_dit = a.get("--h3-dit", c.h3_dit);
   c.h3_te = a.get("--h3-te", c.h3_te);
   c.out_dir = a.get("--out", c.out_dir);
+  c.compute = a.get("--compute", c.compute);
   return c;
 }
 

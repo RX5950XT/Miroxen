@@ -1,4 +1,4 @@
-"""產生獨立參考向量：uv run --with gguf --with numpy python tools/gen_dequant_vectors.py。"""
+"""產生獨立參考向量：uv run --with gguf>=0.19 --with numpy python tools/gen_dequant_vectors.py。"""
 from pathlib import Path
 import struct
 import numpy as np
@@ -28,7 +28,7 @@ def fp8_reference(raw, e4):
 def main():
     rng = np.random.default_rng(20261004)
     names = ["F32", "F16", "BF16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0",
-             "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS"]
+             "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS", "MXFP4", "NVFP4"]
     scales = {"Q4_0": [0], "Q4_1": [0, 2], "Q5_0": [0], "Q5_1": [0, 2],
               "Q8_0": [0], "Q2_K": [80, 82], "Q3_K": [108], "Q4_K": [0, 2],
               "Q5_K": [0, 2], "Q6_K": [208], "IQ4_NL": [0], "IQ4_XS": [0]}
@@ -62,7 +62,7 @@ def main():
             f.write(struct.pack("<III", qt, len(expected), len(raw)))
             f.write(raw)
             f.write(expected.tobytes())
-    print(f"{path.name}: {len(records)} formats, {path.stat().st_size} bytes; gguf-py 15 + FP8 2")
+    print(f"{path.name}: {len(records)} formats, {path.stat().st_size} bytes; gguf-py 17 + FP8 2")
 
 
 if __name__ == "__main__":

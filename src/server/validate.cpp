@@ -252,6 +252,16 @@ std::string read_format(const json& j) {
   return f;
 }
 
+std::string read_compute(const json& j) {
+  if (!j.contains("compute")) return "";
+  if (!j["compute"].is_string())
+    throw ApiError(400, "invalid_request_error", "invalid_compute", "compute 必須是字串");
+  auto c = j["compute"].get<std::string>();
+  if (c != "bf16" && c != "fp8" && c != "fp4")
+    throw ApiError(400, "invalid_request_error", "invalid_compute", "compute 只能是 bf16、fp8 或 fp4");
+  return c;
+}
+
 void read_cfg(const json& j, float& cfg) {
   if (!j.contains("cfg_scale")) return;
   if (!j["cfg_scale"].is_number())
@@ -307,6 +317,7 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
   auto prompt = require_text(j, "prompt", 8000, false);
   auto negative = require_text(j, "negative_prompt", 8000, true);
   auto loras = read_loras(opt, j);
+  auto compute = read_compute(j);
   TempGuard guard;
   auto job = std::make_shared<Job>();
   job->type = type;
@@ -321,6 +332,7 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
     job->image.cfg_scale = cfg;
     job->image.seed = seed;
     job->image.loras = std::move(loras);
+    job->image.compute = compute;
     read_uploads(opt, j, "images", job->image.ref_images, guard, 10);
   } else {
     int frames = j.contains("num_frames") ? read_int(j, "num_frames", 56) : read_int(j, "frames", 56);
@@ -333,6 +345,7 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
     job->video.steps = steps;
     job->video.seed = seed;
     job->video.loras = std::move(loras);
+    job->video.compute = compute;
     read_one_upload(opt, j, "first_frame", job->video.first_frame, guard);
     read_one_upload(opt, j, "last_frame", job->video.last_frame, guard);
   }

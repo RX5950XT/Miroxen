@@ -7,6 +7,7 @@
 #include "core/common.h"
 #include "models/minimax_h3/pipeline.h"
 #include "models/qwen_image/pipeline.h"
+#include "kernels/blockscale.h"
 #include "server/fake_engine.h"
 #include "server/server.h"
 
@@ -71,11 +72,14 @@ class MiroxenEngine : public Engine {
   ImageResult generate_image(const ImageRequest& r, const ProgressFn& cb,
                              const std::atomic<bool>* cancel) override {
     std::lock_guard<std::mutex> lk(m_);
+    const QMode want = parse_qmode(r.compute.empty() ? cfg_.compute : r.compute);
+    if (qi_ && qi_compute_ != want) qi_.reset();  // 換運算精度要重新載入（權重格式不同）
     if (!qi_) {
       h3_.reset();  // 兩個模型不同時常駐，釋放 VRAM 與鎖頁記憶體
       if (cb) cb(Progress{"load", 0, 1});
       QwenImageDevices d;
       d.text = cfg_.qi_text_device;
+      d.compute = qi_compute_ = want;
       qi_ = std::make_unique<QwenImagePipeline>(QwenImagePaths{cfg_.qi_dit, cfg_.qi_te, cfg_.qi_vae, cfg_.qi_tok}, d);
     }
     return qi_->generate(r, cb, cancel);
@@ -84,11 +88,15 @@ class MiroxenEngine : public Engine {
   VideoResult generate_video(const VideoRequest& r, const ProgressFn& cb,
                              const std::atomic<bool>* cancel) override {
     std::lock_guard<std::mutex> lk(m_);
+    const QMode want = parse_qmode(r.compute.empty() ? cfg_.compute : r.compute);
+    if (h3_ && h3_compute_ != want) h3_.reset();
     if (!h3_) {
       qi_.reset();
       if (cb) cb(Progress{"load", 0, 1});
       H3Paths p{cfg_.h3_dit, cfg_.h3_te, cfg_.h3_vvae, cfg_.h3_avae, cfg_.h3_tok, cfg_.out_dir};
-      h3_ = std::make_unique<H3Pipeline>(p, H3Devices{});
+      H3Devices d;
+      d.compute = h3_compute_ = want;
+      h3_ = std::make_unique<H3Pipeline>(p, d);
     }
     return h3_->generate(r, cb, cancel);
   }
@@ -98,6 +106,7 @@ class MiroxenEngine : public Engine {
   std::mutex m_;
   std::unique_ptr<QwenImagePipeline> qi_;
   std::unique_ptr<H3Pipeline> h3_;
+  QMode qi_compute_ = QMode::BF16, h3_compute_ = QMode::BF16;  // 已載入管線所用的精度
 };
 
 }  // namespace

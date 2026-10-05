@@ -30,7 +30,12 @@ std::vector<float> h3_sigmas(int steps, float shift) {
   return s;
 }
 
-H3Dit::H3Dit(const TensorStore& st, int device, int max_layers) : dw_(st, device) {
+H3Dit::H3Dit(const TensorStore& st, int device, int max_layers, QMode compute) : dw_(st, device) {
+  if (!qmode_supported(compute, device)) {
+    MX_INFO("GPU%d 不支援 %s 運算，DiT 改用 bf16", device, qmode_name(compute));
+    compute = QMode::BF16;
+  }
+  compute_ = compute;
   MX_CHECK(st.has("blocks.0.attn.qkv_proj.weight"), "不是 MiniMax-H3 DiT 權重（缺 blocks.0.attn.qkv_proj）");
   MX_CHECK(st.has("adaln_t_table"),
            "目前只支援 pruned（adaln_t_table）版本的 MiniMax-H3 GGUF，例如 unsloth minimax_h3_fl2va_pruned-*.gguf");
@@ -78,14 +83,15 @@ H3Dit::H3Dit(const TensorStore& st, int device, int max_layers) : dw_(st, device
   ffn_ = blocks_[0].fc2.in;
   MX_CHECK(blocks_[0].adaln.out == 18 * dim_ && blocks_[0].adaln.in == basis_, "adaln 形狀不符");
 
-  st_refiner_ = std::make_unique<BlockStreamer>(device);
+  st_refiner_ = std::make_unique<BlockStreamer>(device, compute_);
   for (auto& b : refiner_) st_refiner_->add_block(st, {&b.qkv, &b.out, &b.fc1, &b.fc2});
   st_refiner_->finalize();
-  st_blocks_ = std::make_unique<BlockStreamer>(device);
+  st_blocks_ = std::make_unique<BlockStreamer>(device, compute_);
   for (auto& b : blocks_) st_blocks_->add_block(st, {&b.qkv, &b.out, &b.fc1, &b.fc2});
   st_blocks_->finalize();
   MX_INFO("MiniMax-H3 DiT：%d 層 + %d 層 refiner、dim %lld、注意力 %d×%d、FFN %lld、%s、AdaLN 曲線表 %lld×%lld",
-          nb, nr, (long long)dim_, heads_, head_dim_, (long long)ffn_, gtype_name(blocks_[0].qkv.w.type),
+          nb, nr, (long long)dim_, heads_, head_dim_, (long long)ffn_,
+          strf("%s/%s", gtype_name(blocks_[0].qkv.w.type), qmode_name(compute_)).c_str(),
           (long long)grid_, (long long)basis_);
 }
 
@@ -104,7 +110,8 @@ size_t H3Dit::act_bytes(int64_t S) const {
   size_t per_row = size_t(dim_) * (4 + 2) + size_t(inner_) * 2 * 4;
   size_t chunk = size_t(kChunk) * std::max(3 * inner_, 3 * ffn_) * 2;
   size_t mods = size_t(4) * 18 * dim_ * 4;
-  return per_row * S + chunk + mods + (size_t(64) << 20);
+  size_t quant = compute_ == QMode::BF16 ? 0 : size_t(std::max<int64_t>(kChunk, S)) * std::max(ffn_, inner_) * 9 / 8;
+  return per_row * S + chunk + mods + quant + (size_t(64) << 20);
 }
 
 std::vector<Linear*> H3Dit::linears() {

@@ -16,6 +16,7 @@ struct EngineConfig {
   // MiniMax-H3
   std::string h3_dit, h3_te, h3_vvae, h3_avae, h3_tok;
   std::string out_dir = "out";
+  std::string compute = "fp8";  // DiT 運算精度：bf16 / fp8 / fp4（fp8/fp4 需 Blackwell，否則自動退回 bf16）
 };
 
 std::unique_ptr<Engine> make_engine(const EngineConfig& cfg);

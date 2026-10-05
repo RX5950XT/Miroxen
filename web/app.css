@@ -137,7 +137,7 @@ button:hover:not(:disabled) { background: var(--surface-2); }
 }
 
 .field { display: flex; flex-direction: column; gap: 0.3rem; font-size: var(--fs-0); color: var(--ink-muted); }
-.field textarea, .field input[type="number"], .field input[type="text"] {
+.field textarea, .field input[type="number"], .field input[type="text"], .field select {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -155,7 +155,9 @@ details summary { cursor: pointer; color: var(--ink); }
 details textarea { margin-top: 0.4rem; width: 100%; }
 
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7rem; }
-.seed-field { grid-column: 1 / -1; }
+.seed-field, .field.wide { grid-column: 1 / -1; }
+.field select { cursor: pointer; }
+.help { font-size: var(--fs-0); color: var(--ink-muted); }
 .seed-row { display: flex; gap: 0.4rem; }
 .seed-row input { flex: 1; }
 
