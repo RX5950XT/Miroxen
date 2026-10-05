@@ -5,13 +5,15 @@
 
 #include "core/ctx.h"
 #include "core/model_file.h"
+#include "kernels/blockscale.h"
 
 namespace mx {
 
 class H3VideoVae {
  public:
   // st：unsloth/Comfy 的 minimax_h3_video_vae_fp16.safetensors 或 diffusers 格式 vae/ 分片（皆需支援）。
-  H3VideoVae(const TensorStore& st, int device);
+  // compute：ViT 解碼器 36 層線性層的運算精度（FP8/FP4 用區塊縮放 tensor core；不支援時退回 bf16）。
+  H3VideoVae(const TensorStore& st, int device, QMode compute = QMode::BF16);
   ~H3VideoVae();
 
   // z：裝置 [24, F_lat, H, W] f32，DiT 輸出的「正規化」latent（本類別負責乘 std 加 mean）。

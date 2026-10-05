@@ -4,7 +4,7 @@
 //                  [--shift-terminal 0]（步數蒸餾 LoRA 用，例如 Turbo8：--steps 8 --shift-terminal 0）
 //   miroxen video  -p "prompt" [-W 864 -H 480] [--frames 56] [--steps 30] [--first 首幀.png] [--last 尾幀.png]
 //                  [--ref image=圖.png --ref video=片.mp4 --ref audio=聲.wav]（Ref2VA 參考生成）[--shift 12]
-//   miroxen serve  [--port 8188] [--host 127.0.0.1] [--api-key KEY] [--fake]
+//   miroxen serve  [--port 8188] [--host 127.0.0.1] [--api-key KEY] [--max-body 256（MB，0＝不限）] [--fake]
 // 模型路徑預設在 models/ 底下，可用 --qi-dit / --qi-te / --qi-vae / --qi-tok 覆寫。
 // --compute bf16|fp8|fp4：DiT 運算精度（fp8/fp4 用 Blackwell 區塊縮放 tensor core）。
 #include <cstdlib>

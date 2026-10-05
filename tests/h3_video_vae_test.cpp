@@ -99,7 +99,9 @@ static int compare(const TensorStore& weights, const TensorStore& ref, const cha
            "參考單張圖型別或 shape 不符");
   MX_CHECK(encoded_ref.shape == std::vector<int64_t>({24, 1, 16, 28}), "參考編碼 shape 不符");
   auto input = host_f32(latent_ref), expected_latent = host_f32(encoded_ref);
-  H3VideoVae vae(weights, 0);
+  // MX_TEST_VAE_COMPUTE=fp8 時用 FP8 解碼器（量畫質損失）。
+  const char* qc = std::getenv("MX_TEST_VAE_COMPUTE");
+  H3VideoVae vae(weights, 0, qc ? parse_qmode(qc) : QMode::BF16);
   Ctx c(0, vae.decode_act_bytes(16, 28), 0);
   DevBuf z(input.size() * sizeof(float), 0), encoded(expected_latent.size() * sizeof(float), 0);
   MX_CUDA(cudaMemcpyAsync(z.get(), input.data(), z.size(), cudaMemcpyHostToDevice, c.stream));
@@ -130,7 +132,7 @@ static int compare(const TensorStore& weights, const TensorStore& ref, const cha
   std::printf("%s decode arena %.2f MiB / budget %.2f MiB; encoder arena %.2f MiB\n", layout,
               c.act.peak() / 1048576.0, vae.decode_act_bytes(16, 28) / 1048576.0,
               encoder_ctx.act.peak() / 1048576.0);
-  if (bench && decode_ok && encode_ok) benchmark(vae, layout);
+  if (bench && (qc || (decode_ok && encode_ok))) benchmark(vae, layout);
   int video_fail = 0;
   const char* vref = "models/ref/h3_video_encode_ref.safetensors";  // tools/ref/h3_video_encode_ref.py
   if (std::filesystem::exists(vref)) {

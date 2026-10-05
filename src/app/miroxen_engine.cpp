@@ -131,6 +131,7 @@ int cmd_serve(const std::map<std::string, std::string>& kv, const EngineConfig& 
   opt.web_dir = get("--web", opt.web_dir);
   opt.out_dir = get("--out", cfg.out_dir);
   opt.lora_dir = get("--loras", (fs::path(cfg.models_dir) / "loras").string());
+  opt.max_body_mb = size_t(std::atoll(get("--max-body", std::to_string(opt.max_body_mb)).c_str()));
   if (kv.count("--fake")) {
     FakeEngine fake;
     return run_server(fake, opt);

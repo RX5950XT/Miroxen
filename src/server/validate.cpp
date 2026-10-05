@@ -282,6 +282,12 @@ void read_references(const ServerOptions& opt, const json& j, std::vector<MediaR
     auto path = kind == "image" ? save_upload(opt, data, guard) : save_media(opt, data, guard);
     out.push_back({kind, path.string()});
   }
+  int count[3] = {0, 0, 0};  // image / video / audio
+  for (auto& m : out) count[m.kind == "image" ? 0 : m.kind == "video" ? 1 : 2]++;
+  if (count[0] > 9 || count[1] > 3 || count[2] > 3)
+    throw ApiError(400, "invalid_request_error", "invalid_references", "參考最多 9 張圖、3 段影片、3 段音訊");
+  if (!out.empty() && count[0] + count[1] == 0)
+    throw ApiError(400, "invalid_request_error", "invalid_references", "音訊參考必須搭配至少一張圖或一段影片");
 }
 
 void read_one_upload(const ServerOptions& opt, const json& j, const char* key, std::string& path, TempGuard& guard) {

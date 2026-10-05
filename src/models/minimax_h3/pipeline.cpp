@@ -54,7 +54,7 @@ H3Pipeline::H3Pipeline(const H3Paths& p, H3Devices d) : paths_(p), dev_(d) {
   te_ = std::make_unique<Qwen3TextEncoder>(te_st_, dev_.text, /*stream=*/true);
   te_ctx_ = std::make_unique<Ctx>(dev_.text, size_t(512) << 20, te_->scratch_bytes());
   dit_ = std::make_unique<H3Dit>(dit_st_, dev_.dit, 0, d.compute);
-  vvae_ = std::make_unique<H3VideoVae>(vvae_st_, dev_.video_vae);
+  vvae_ = std::make_unique<H3VideoVae>(vvae_st_, dev_.video_vae, d.compute);
   avae_ = std::make_unique<H3AudioVae>(avae_st_, dev_.audio_vae);
   avae_ctx_ = std::make_unique<Ctx>(dev_.audio_vae, size_t(1) << 30, 0);
   MX_INFO("MiniMax-H3 管線就緒：DiT@GPU%d（串流）、文字編碼器@GPU%d（串流）、影片 VAE@GPU%d、音訊 VAE@GPU%d",
