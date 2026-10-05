@@ -238,7 +238,12 @@ void QwenImageDit::run_block(Ctx& c, QwenImageSeq& seq, int li, float* x, int64_
   ap.Skv = int(S);
   ap.causal = 0;
   const int64_t qoff = prefill ? T : 0;
-  flash_attn(q + qoff * dim, k, v, tmp + qoff * dim, ap, c.stream);
+  if (compute_ != QMode::BF16) {  // 低精度模式下注意力也用 INT8/FP8 tensor core
+    ArenaScope s3(c.act);
+    flash_attn_fp8(q + qoff * dim, k, v, tmp + qoff * dim, ap, c.act.alloc(flash_attn_fp8_workspace(ap)), c.stream);
+  } else {
+    flash_attn(q + qoff * dim, k, v, tmp + qoff * dim, ap, c.stream);
+  }
   linear(c, b.o, tmp, rows, h);
   gated_residual(x, h, rows, dim, rm(dim), 1, c.stream);
 

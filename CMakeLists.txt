@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 # 本機硬體：RTX 5060 Ti (sm_120) + RTX 3060 Ti (sm_86)。必須在 project() 之前設定，否則 CMake 會填入編譯器預設值。
+# 120a：開啟 sm_120 專屬指令（區塊縮放 MMA 是一般 FP8 MMA 的兩倍速、原生 FP4 轉換）；只能跑在 cc 12.0 的卡上。
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 120 86)
+  set(CMAKE_CUDA_ARCHITECTURES 120a 86)
 endif()
 project(miroxen LANGUAGES CXX CUDA)
 

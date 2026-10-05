@@ -19,9 +19,16 @@
 ## 區塊縮放 GEMM（FP8／FP4，2026-10-05）
 - cuBLASLt 的 `VEC32_UE8M0`（MXFP8）與 `VEC16_UE4M3`（NVFP4）在 sm_120 可用；`OUTER_VEC`、128 區塊縮放不行。
 - 縮放張量要照 128×4 交錯排列，而且補齊的欄／列 cuBLASLt 也會讀：沒清零時 0xff 在 ue8m0 是 NaN（K 不是 128 倍數時才出現）。
-- `__nv_cvt_float2_to_fp4x2` 的硬體指令只在 `sm_120a` 這類架構專屬目標才會產生，通用 sm_120 會退回軟體模擬（慢 2 倍以上）。
+- `__nv_cvt_float2_to_fp4x2` 的硬體指令只在 `sm_120a` 這類架構專屬目標才會產生，通用 sm_120 會退回軟體模擬（慢 2 倍以上）；blockscale.cu 改用門檻比較編碼，兩種目標都快。
 - 驗證排列：把量化結果在主機端照格式解回 f32 做 GEMM 比對，排列錯會直接對不上（tests/blockscale_test.cpp）。
 
 ## nvcc 與中文字串
 - `.cu` 檔的 `MX_CHECK` 訊息含全形字元會被 nvcc 前端讀壞（missing closing quote），`.cu` 一律用英文訊息；
   測試若要中文訊息就寫成 `.cpp`。
+
+## GeForce Blackwell tensor core 實測（5060 Ti，2026-10-05）
+- `mma.sync` 速度：bf16（fp32 累加）44、FP8 e4m3（fp32 累加）90、INT8 180、`kind::mxf8f6f4.block_scale` FP8 180 TFLOPS。
+  一般 FP8 MMA 只有半速；要全速就用區塊縮放版本並把縮放設成 2⁰（ue8m0 0x7f）。需要 `sm_120a` 編譯，專案已改成 `120a;86`。
+- 自寫小測試量指令速度時記得選對卡：CUDA 預設 device 0 是 3060 Ti（見上），在 sm_86 上跑 sm_120 cubin 會報 no kernel image。
+- FP8 注意力（SageAttention2 式）第一版 1 CTA/SM 只到 67 TFLOPS；換全速 MMA 到 82，`__launch_bounds__(256, 2)` 壓到 128 暫存器後 105。
+  改 exp／int→float 轉換沒有幫助，瓶頸是 MMA 速率與佔用率。

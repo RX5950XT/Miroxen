@@ -21,11 +21,13 @@ struct AttnParams {
 void flash_attn(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams& p,
                 cudaStream_t s);
 
-// 低精度注意力（SageAttention 式）：Q、K 依區塊做 INT8 量化（K 先減去每通道平均，softmax 不變），
-// P·V 用 FP16（或 sm_120 上 FP8）tensor core。只支援 causal=0、D ∈ {64, 128}（擴散模型主要情境）。
-// GeForce 卡上 INT8 / FP16 累加 tensor core 是 bf16(fp32 累加) 的 2–4 倍。誤差較 flash_attn 大，見測試。
-void flash_attn_i8(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams& p,
-                   cudaStream_t s);
+// 低精度注意力（SageAttention2 式）：Q·Kᵀ 用 INT8（Q 每 16 列、K 每 64 列一個縮放，K 先減去每通道平均，
+// softmax 不變），P·V 用 FP8 e4m3（V 每通道縮放），都是 fp32 累加。GeForce Blackwell 上這兩種 tensor core
+// 是 bf16(fp32 累加) 的 4 倍。只支援 causal=0、D ∈ {64, 128}、kv_stride/q_stride 為 8 的倍數且 16 bytes 對齊、
+// sm_89 以上；其他情況自動改用 flash_attn。ws 至少 flash_attn_fp8_workspace(p) bytes、256 對齊。
+size_t flash_attn_fp8_workspace(const AttnParams& p);
+void flash_attn_fp8(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams& p, void* ws,
+                    cudaStream_t s);
 
 // 慢速參考實作（GPU 樸素版，fp32 softmax），只給測試用。
 void attn_reference(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams& p,

@@ -110,7 +110,10 @@ size_t H3Dit::act_bytes(int64_t S) const {
   size_t per_row = size_t(dim_) * (4 + 2) + size_t(inner_) * 2 * 4;
   size_t chunk = size_t(kChunk) * std::max(3 * inner_, 3 * ffn_) * 2;
   size_t mods = size_t(4) * 18 * dim_ * 4;
-  size_t quant = compute_ == QMode::BF16 ? 0 : size_t(std::max<int64_t>(kChunk, S)) * std::max(ffn_, inner_) * 9 / 8;
+  // 低精度模式：啟用值量化暫存與 FP8 注意力工作區（約 3·S·inner bytes）不會同時使用，取大者。
+  size_t quant = compute_ == QMode::BF16 ? 0
+                                         : std::max(size_t(std::max<int64_t>(kChunk, S)) * std::max(ffn_, inner_) * 9 / 8,
+                                                    size_t(S + 128) * inner_ * 3 + (size_t(4) << 20));
   return per_row * S + chunk + mods + quant + (size_t(64) << 20);
 }
 
@@ -207,7 +210,12 @@ void H3Dit::attn_mlp(Ctx& c, const Block& b, float* x, int64_t S, const float* c
   ap.Sq = ap.Skv = int(S);
   ap.Hq = ap.Hkv = heads_;
   ap.D = head_dim_;
-  flash_attn(q, k, v, o, ap, c.stream);
+  if (compute_ != QMode::BF16) {  // 低精度模式下注意力也用 INT8/FP8 tensor core
+    ArenaScope s3(c.act);
+    flash_attn_fp8(q, k, v, o, ap, c.act.alloc(flash_attn_fp8_workspace(ap)), c.stream);
+  } else {
+    flash_attn(q, k, v, o, ap, c.stream);
+  }
   linear(c, b.out, o, S, h);
   for (auto& g : segs) gated_residual(x + g.start * D, h + g.start * D, g.len, D, m(g, 2), 0, c.stream);
 
