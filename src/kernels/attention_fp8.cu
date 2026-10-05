@@ -11,7 +11,7 @@
 namespace mx {
 namespace {
 
-constexpr int kW = 8;          // 每個 CTA 的 warp 數
+constexpr int kW = 4;          // 每個 CTA 的 warp 數；縮小 Q tile，讓 D=128 不必為兩個大型 CTA 壓到 128 registers
 constexpr int kQ = 16 * kW;    // 每個 CTA 的 query 數
 constexpr int kK = 64;         // 每個 K/V tile 的 key 數
 constexpr int kStatTok = 256;  // kv_stats 每個 block 處理的 token 數
@@ -184,7 +184,8 @@ __device__ __forceinline__ void mma_fp8(float (&c)[4], const unsigned (&a)[4], u
 }
 
 template <int D>
-__global__ void __launch_bounds__(kW * 32, 2) fp8_attn_kernel(const int8_t* qi, const int8_t* ki, const uint8_t* vt,
+// 每個 SM 至少 3 個小 CTA：sm_120a 的 D=128 可用 168 registers，免去迴圈內的 spill。
+__global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, const int8_t* ki, const uint8_t* vt,
                                                           const float* qs, const float* ks, const float* va,
                                                           bf16* o, AttnParams p, int64_t sq_pad, int64_t skv_pad) {
 #if __CUDA_ARCH__ >= 890

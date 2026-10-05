@@ -110,6 +110,7 @@ int main() {
     check({1024, 4352, 2, 2, 128, 0, 8.f});
     bench(4352, 32, 128);
     bench(16384, 24, 128);
+    bench(7076, 56, 128);
     std::printf("attention_fp8_test PASS\n");
     return 0;
   } catch (const std::exception& e) {
