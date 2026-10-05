@@ -144,7 +144,11 @@ static int compare(const TensorStore& weights, const TensorStore& ref, const cha
     MX_CHECK(H3VideoVae::encoded_frames(22) == 7, "encoded_frames(22) 應為 7");
     Ctx vc(0, size_t(6) << 30, 0);
     DevBuf vz(vexpect.size() * sizeof(float), 0);
+    vae.encode_video(vc, static_cast<const uint8_t*>(vrgb.data), 22, 256, 448, vz.as<float>());  // 暖機
+    auto ve0 = Clock::now();
     vae.encode_video(vc, static_cast<const uint8_t*>(vrgb.data), 22, 256, 448, vz.as<float>());
+    std::printf("%s encode_video 22 幀 256×448：%.0f ms\n", layout,
+                std::chrono::duration<double, std::milli>(Clock::now() - ve0).count());
     std::vector<float> vgot(vexpect.size());
     MX_CUDA(cudaMemcpy(vgot.data(), vz.get(), vz.size(), cudaMemcpyDeviceToHost));
     double ve = relative_error(vgot, vexpect);

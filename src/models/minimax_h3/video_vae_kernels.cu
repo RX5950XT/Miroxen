@@ -58,21 +58,36 @@ __global__ void image_kernel(const uint8_t* rgb, bf16* out, int H, int W,
   out[i]=__float2bfloat16((rgb[((y+pos/w)*W+x+pos%w)*3+c]/255.f-mean[c])/std[c]);
 }
 __device__ int reflect(int p, int n) { return p<0 ? -p : (p>=n ? 2*n-p-2 : p); }
-__global__ void im2col_kernel(const bf16* x, bf16* col, int H, int W, int C,
-    int kh, int kw, int stride, int pad, int OH, int OW, int start, int rows) {
-  int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x, K=int64_t(C)*kh*kw;
-  if (i>=rows*K) return;
-  int k=i%K, pos=start+i/K;
-  int c=k/(kh*kw), ky=k/kw%kh, kx=k%kw;
+// Each col row holds kh*kw taps in order, each tap C contiguous channels: k = (ky*kw + kx)*C + c.
+// With C % 8 == 0 a thread moves 8 bf16 (16 bytes) at once.
+__global__ void im2col_kernel(const bf16* x, bf16* col, int64_t ldcol, int H, int W, int C,
+    int kh, int kw, int stride, int pad, int OH, int OW, int start, int rows, int vec) {
+  const int cv=C/vec, taps=kh*kw;
+  int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+  if (i>=int64_t(rows)*taps*cv) return;
+  int c=int(i%cv)*vec; int64_t rest=i/cv;
+  int tap=int(rest%taps), r=int(rest/taps), pos=start+r;
+  int ky=tap/kw, kx=tap%kw;
   int yy=reflect(pos/OW*stride-pad+ky,H), xx=reflect(pos%OW*stride-pad+kx,W);
-  col[i]=x[(yy*W+xx)*C+c];
+  const bf16* src=x+(int64_t(yy)*W+xx)*C+c;
+  bf16* dst=col+int64_t(r)*ldcol+int64_t(tap)*C+c;
+  if (vec==8) *reinterpret_cast<uint4*>(dst)=*reinterpret_cast<const uint4*>(src);
+  else *dst=*src;
 }
+void launch_im2col(const bf16* x,bf16* col,int64_t ldcol,int H,int W,int C,int kh,int kw,int stride,int pad,
+    int OH,int OW,int start,int rows,cudaStream_t s) {
+  const int vec=C%8==0?8:1;
+  const int64_t n=int64_t(rows)*kh*kw*(C/vec);
+  im2col_kernel<<<unsigned((n+255)/256),256,0,s>>>(x,col,ldcol,H,W,C,kh,kw,stride,pad,OH,OW,start,rows,vec); MX_KCHECK();
+}
+// blockDim must be a multiple of 32 and at most 1024.
 __device__ float sum_block(float v) {
-  __shared__ float sums[8];
+  __shared__ float sums[32];
+  __syncthreads();  // a previous call may still be reading sums[0]
   for (int off=16;off;off/=2) v+=__shfl_down_sync(0xffffffff,v,off);
   if (!(threadIdx.x%32)) sums[threadIdx.x/32]=v;
   __syncthreads();
-  v=threadIdx.x<8?sums[threadIdx.x]:0;
+  v=threadIdx.x<blockDim.x/32?sums[threadIdx.x]:0;
   if (threadIdx.x<32) for(int off=16;off;off/=2) v+=__shfl_down_sync(0xffffffff,v,off);
   if (!threadIdx.x) sums[0]=v;
   __syncthreads();
@@ -121,10 +136,14 @@ void image_input(const uint8_t* rgb,bf16* out,int H,int W,int y,int x,int h,int 
 }
 void im2col(const bf16* x,bf16* col,int H,int W,int C,int kh,int kw,int stride,int pad,
     int OH,int OW,int start,int rows,cudaStream_t s) {
-  im2col_kernel<<<unsigned((int64_t(rows)*C*kh*kw+255)/256),256,0,s>>>(x,col,H,W,C,kh,kw,stride,pad,OH,OW,start,rows); MX_KCHECK();
+  launch_im2col(x,col,int64_t(C)*kh*kw,H,W,C,kh,kw,stride,pad,OH,OW,start,rows,s);
+}
+void im2col_ld(const bf16* x,bf16* col,int64_t ldcol,int H,int W,int C,int kh,int kw,int stride,int pad,
+    int OH,int OW,int start,int rows,cudaStream_t s) {
+  launch_im2col(x,col,ldcol,H,W,C,kh,kw,stride,pad,OH,OW,start,rows,s);
 }
 void groupnorm_silu(const bf16* x,bf16* out,const float* w,const float* b,int spatial,int C,int groups,float eps,cudaStream_t s) {
-  gn_kernel<<<groups,256,0,s>>>(x,out,w,b,spatial,C,groups,eps); MX_KCHECK();
+  gn_kernel<<<groups,1024,0,s>>>(x,out,w,b,spatial,C,groups,eps); MX_KCHECK();
 }
 void channel_normalize(const float* m,float* z,const float* mean,const float* std,int rows,cudaStream_t s) {
   normalize_kernel<<<(rows*24+255)/256,256,0,s>>>(m,z,mean,std,rows); MX_KCHECK();

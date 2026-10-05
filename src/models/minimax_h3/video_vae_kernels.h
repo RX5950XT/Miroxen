@@ -16,6 +16,9 @@ void image_input(const uint8_t* rgb, bf16* out, int H, int W, int y, int x,
                  int h, int w, cudaStream_t s);
 void im2col(const bf16* x, bf16* col, int H, int W, int C, int kh, int kw,
              int stride, int pad, int OH, int OW, int start, int rows, cudaStream_t s);
+// 同 im2col，但每列寫在 col + r·ldcol（多個時間 tap 並排成一列，給融合的 3D 卷積用）。
+void im2col_ld(const bf16* x, bf16* col, int64_t ldcol, int H, int W, int C, int kh, int kw,
+               int stride, int pad, int OH, int OW, int start, int rows, cudaStream_t s);
 void groupnorm_silu(const bf16* x, bf16* out, const float* weight, const float* bias,
                      int spatial, int C, int groups, float eps, cudaStream_t s);
 void channel_normalize(const float* moments, float* z, const float* mean,

@@ -141,9 +141,9 @@ void stitch(const std::vector<float>& tile,const std::vector<float>* above,const
       out[((size_t(t)*H+y+yy)*W+x+xx)*channels+c]=v;
     }
 }
-// l：最後一個時間平面（單幀路徑只看得到它）；taps：全部時間平面（多幀因果 3D 卷積，前面補 kt-1 個零幀），
-// 第一次編碼影片時才載入（src 指向原始權重）。
-struct Conv {Linear l;std::vector<Linear> taps;const WeightRef* src=nullptr;int kh=1,kw=1,kt=1,stride=1,pad=0,tstride=1;};
+// l：最後一個時間平面（單幀路徑只看得到它）；fused：全部時間平面並排成 [out, kt·in·kh·kw]（多幀因果 3D 卷積，
+// 前面補 kt-1 個零幀），第一次編碼影片時才載入（src 指向原始權重）。
+struct Conv {Linear l,fused;const WeightRef* src=nullptr;int kh=1,kw=1,kt=1,stride=1,pad=0,tstride=1;};
 struct Resnet {Conv c1,c2,shortcut;const float *w1=nullptr,*b1=nullptr,*w2=nullptr,*b2=nullptr;};
 struct Level {std::vector<Resnet> blocks;Conv down;};
 struct Block {Linear q,k,v,qkv,proj,ff1,ff2;const float *n1,*n2,*s1,*s2;};
@@ -263,24 +263,26 @@ struct H3VideoVae::Impl {
     Conv cv;cv.kh=int(r.shape[3]);cv.kw=int(r.shape[4]);cv.kt=int(r.shape[2]);cv.stride=stride;cv.pad=cv.kh==1?0:pad;
     cv.src=&r;cv.l=conv_plane(cv,cv.kt-1,f32(name+".bias",{out}));return cv;
   }
-  // 第 k 個時間平面 → [out, in·kh·kw] 的 bf16 線性層。
-  Linear conv_plane(const Conv& cv,int k,const float* bias) {
+  // 時間平面 [k0, k0+nk) 並排 → [out, nk·in·kh·kw] 的 bf16 線性層。
+  Linear conv_planes(const Conv& cv,int k0,int nk,const float* bias,const std::string& key) {
     const WeightRef& r=*cv.src;
     const int out=int(r.shape[0]),in=int(r.shape[1]),hw=cv.kh*cv.kw,K=in*hw;
-    std::vector<float> host(size_t(out)*K);
-    for(int o=0;o<out;++o) for(int c=0;c<in;++c) {
-      size_t src=((size_t(o)*in+c)*cv.kt+k)*hw;
-      dequant_cpu(static_cast<const char*>(r.data)+src*gtype_block_bytes(r.type),r.type,hw,host.data()+size_t(o)*K+c*hw);
+    // 欄順序與 im2col 一致：每個時間平面內 (ky, kx) 在外、通道在內（k = tap·in + c）。
+    std::vector<float> host(size_t(out)*nk*K),taps(hw);
+    for(int o=0;o<out;++o) for(int k=0;k<nk;++k) for(int c=0;c<in;++c) {
+      size_t src=((size_t(o)*in+c)*cv.kt+k0+k)*hw;
+      dequant_cpu(static_cast<const char*>(r.data)+src*gtype_block_bytes(r.type),r.type,hw,taps.data());
+      for(int tp=0;tp<hw;++tp) host[(size_t(o)*nk+k)*K+size_t(tp)*in+c]=taps[tp];
     }
-    DevBuf raw=upload(host),converted(size_t(out)*K*sizeof(bf16),device);
-    dequant_to_bf16(raw.get(),GType::F32,int64_t(out)*K,converted.as<bf16>(),nullptr);MX_CUDA(cudaDeviceSynchronize());
-    Linear l;l.name=r.name;l.in=K;l.out=out;l.w={converted.get(),GType::BF16,{out,K}};l.bias=bias;
-    matrices.emplace(r.name+"#"+std::to_string(k),std::move(converted));return l;
+    DevBuf raw=upload(host),converted(host.size()*sizeof(bf16),device);
+    dequant_to_bf16(raw.get(),GType::F32,int64_t(host.size()),converted.as<bf16>(),nullptr);MX_CUDA(cudaDeviceSynchronize());
+    Linear l;l.name=r.name;l.in=int64_t(nk)*K;l.out=out;l.w={converted.get(),GType::BF16,{out,int64_t(nk)*K}};l.bias=bias;
+    matrices.emplace(r.name+key,std::move(converted));return l;
   }
+  Linear conv_plane(const Conv& cv,int k,const float* bias) { return conv_planes(cv,k,1,bias,"#"+std::to_string(k)); }
   void ensure_taps(Conv& cv) {
-    if(!cv.src || !cv.taps.empty()) return;
-    for(int k=0;k<cv.kt-1;++k) cv.taps.push_back(conv_plane(cv,k,cv.l.bias));
-    cv.taps.push_back(cv.l);
+    if(!cv.src || cv.fused) return;
+    cv.fused=cv.kt==1?cv.l:conv_planes(cv,0,cv.kt,cv.l.bias,"#all");
   }
   void ensure_all_taps() {
     ensure_taps(conv_in);ensure_taps(conv_out);ensure_taps(quant);
@@ -440,26 +442,23 @@ struct H3VideoVae::Impl {
     std::vector<float> host(size_t(hh)*ww*48);
     MX_CUDA(cudaMemcpyAsync(host.data(),moments,host.size()*sizeof(float),cudaMemcpyDeviceToHost,c.stream));c.sync();return host;
   }
-  // 因果 3D 卷積：in 為 Tin 個連續的 [H, W, C] 幀；第 t 個輸出 = Σ_k taps[k]·im2col(in[t·ts + k − (kt−1)])，
-  // 索引為負的幀是補零（直接略過）。回傳輸出幀數。
+  // 因果 3D 卷積：in 為 Tin 個連續的 [H, W, C] 幀；第 t 個輸出 = fused·[im2col(in[t·ts+k−(kt−1)]) 並排，k = 0..kt−1]，
+  // 索引為負的幀是補零。三個時間 tap 合成一次 GEMM（K 變成 3 倍、不必 f32 累加）。回傳輸出幀數。
   int conv3d(Ctx& c,const Conv& cv,const bf16* in,int Tin,int H,int W,int C,bf16* out,int OH,int OW) {
-    const int kt=int(cv.taps.size()),ts=cv.tstride,Tout=(Tin-1)/ts+1;
-    MX_CHECK(kt>=1,"H3 VAE 3D 卷積缺少時間平面");
-    const int K=C*cv.kh*cv.kw,N=OH*OW,O=int(cv.l.out),rows=std::min(N,std::max(4096,int((size_t(128)<<20)/(size_t(K)*2))));
+    MX_CHECK(bool(cv.fused),"H3 VAE 3D 卷積權重未載入");
+    const int kt=cv.kt,ts=cv.tstride,Tout=(Tin-1)/ts+1;
+    const int K=C*cv.kh*cv.kw,K3=kt*K,N=OH*OW,O=int(cv.l.out);
+    const int rows=std::min(N,std::max(1024,int((size_t(128)<<20)/(size_t(K3)*2))));  // im2col 緩衝上限約 128 MiB
     ArenaScope scope(c.act);
-    auto col=c.act.alloc_n<bf16>(size_t(rows)*K);
-    auto acc=c.act.alloc_n<float>(size_t(rows)*O);
+    auto col=c.act.alloc_n<bf16>(size_t(rows)*K3);
     for(int t=0;t<Tout;++t) for(int start=0;start<N;start+=rows) {
-      int n=std::min(rows,N-start);bool first=true;
+      int n=std::min(rows,N-start);
       for(int k=0;k<kt;++k) {
         int ti=t*ts+k-(kt-1);
-        if(ti<0) continue;
-        h3v::im2col(in+size_t(ti)*H*W*C,col,H,W,C,cv.kh,cv.kw,cv.stride,cv.pad,OH,OW,start,n,c.stream);
-        gemm_bf16(c,col,K,static_cast<const bf16*>(cv.taps[k].w.p),K,acc,true,O,n,O,K,first?0.f:1.f);
-        first=false;
+        if(ti<0) MX_CUDA(cudaMemset2DAsync(col+size_t(k)*K,size_t(K3)*2,0,size_t(K)*2,n,c.stream));
+        else h3v::im2col_ld(in+size_t(ti)*H*W*C,col+size_t(k)*K,K3,H,W,C,cv.kh,cv.kw,cv.stride,cv.pad,OH,OW,start,n,c.stream);
       }
-      add_bias_f32(acc,cv.l.bias,n,O,c.stream);
-      f32_to_bf16(acc,out+(size_t(t)*N+start)*O,size_t(n)*O,c.stream);
+      linear(c,cv.fused,col,n,out+(size_t(t)*N+start)*O);
     }
     return Tout;
   }
