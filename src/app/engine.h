@@ -24,6 +24,7 @@ struct ImageRequest {
   std::vector<std::string> ref_images;  // 編輯用參考圖（檔案路徑，PNG/JPG）
   std::vector<LoraSpec> loras;
   std::string compute;          // DiT 運算精度 "bf16"/"fp8"/"fp4"；空 = 引擎預設
+  bool shift_terminal = true;   // 排程尾端拉伸到 0.02（官方預設）；步數蒸餾 LoRA（如 Turbo8）要關掉
 };
 
 struct VideoRequest {

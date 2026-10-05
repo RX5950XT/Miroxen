@@ -221,6 +221,9 @@ void test_validation(httplib::Client& cli) {
   expect_code(post_json(cli, "/v1/images/generations", compute), 400, "invalid_compute");
   compute["compute"] = 4;
   expect_code(post_json(cli, "/v1/images/generations", compute), 400, "invalid_compute");
+  auto st = image_body();
+  st["shift_terminal"] = "no";
+  expect_code(post_json(cli, "/v1/images/generations", st), 400, "invalid_type");
   auto n = image_body();
   n["n"] = 2;
   expect_code(post_json(cli, "/v1/images/generations", n), 400, "invalid_n");

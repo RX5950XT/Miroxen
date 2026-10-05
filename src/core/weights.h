@@ -35,6 +35,9 @@ class DeviceWeights {
   const float* f32_or_null(const std::string& name) { return st_.has(name) ? f32(name) : nullptr; }
   // 把 Linear 權重轉成區塊縮放格式（FP8/FP4，載入時一次）並釋放原始權重。BF16 不動作。
   void quantize(Linear& l, QMode m);
+  // 量化層：把 l.loras 併進權重（從原始檔重新反量化 + B·A + 重新量化），之後推論不必另算 LoRA。
+  // loras 為空時還原成原始權重。非量化層不動作（bf16 路徑照常即時算 LoRA）。
+  void merge_loras(Ctx& c, Linear& l);
   const TensorStore& store() const { return st_; }
   size_t bytes() const { return bytes_; }
   int device() const { return dev_; }
@@ -49,9 +52,10 @@ class DeviceWeights {
 
 // 一個 LoRA 對某個線性層輸出區段 [out_off, out_off+out_len) 的增量：y += scale · (x Aᵀ) Bᵀ。
 struct LoraDelta {
-  DevBuf A, B;  // A [r, in]、B [out_len, r]，bf16
+  DevBuf A, B;  // A [r, in]、B [out_len, r]；bf16，f32 為真時是 f32（給 linear_f32 的層）
   int64_t rank = 0, out_off = 0, out_len = 0;
   float scale = 1.f;
+  bool f32 = false;
 };
 
 // 區塊縮放（FP8/FP4）權重，見 kernels/blockscale.h。
@@ -59,6 +63,7 @@ struct QWeight {
   QMode mode = QMode::BF16;
   QMat m;              // 指向下面擁有的緩衝，或串流時由 BlockStreamer 指向裝置槽
   DevBuf q, sf, amax;  // 常駐時擁有
+  bool merged = false; // q 已包含 Linear::loras（見 DeviceWeights::merge_loras）
   QMat mat() const { return m; }
 };
 
@@ -95,6 +100,7 @@ void linear_f32(Ctx& c, const Linear& l, const float* x, int64_t M, float* y);
 struct LoraTarget {
   Linear* linear = nullptr;
   int64_t out_off = 0, out_len = -1;  // -1 = 整個輸出
+  bool f32 = false;                   // 目標層走 linear_f32
 };
 using LoraResolver = std::function<bool(const std::string& name, LoraTarget& t)>;
 

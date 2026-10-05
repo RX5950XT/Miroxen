@@ -11,7 +11,7 @@ namespace mx {
 
 static const char* kSysPrompt = "Comprehend and analyze the provided prompt.";
 
-std::vector<float> qwen_image_sigmas(int steps, int64_t image_tokens) {
+std::vector<float> qwen_image_sigmas(int steps, int64_t image_tokens, bool shift_terminal) {
   MX_CHECK(steps >= 1, "steps 必須 >= 1");
   // scheduler_config：base_image_seq_len 256、max_image_seq_len 8192、base_shift 0.5、max_shift 0.9
   const double m = (0.9 - 0.5) / (8192.0 - 256.0), b = 0.5 - m * 256.0;
@@ -21,7 +21,7 @@ std::vector<float> qwen_image_sigmas(int steps, int64_t image_tokens) {
     double lin = steps == 1 ? 1.0 : 1.0 + (1.0 / steps - 1.0) * i / (steps - 1);
     s[i] = emu / (emu + (1.0 / lin - 1.0));
   }
-  const double sf = (1.0 - s.back()) / (1.0 - 0.02);  // shift_terminal 0.02
+  const double sf = shift_terminal ? (1.0 - s.back()) / (1.0 - 0.02) : 1.0;  // shift_terminal 0.02
   std::vector<float> out(steps + 1, 0.f);
   for (int i = 0; i < steps; i++) out[i] = float(1.0 - (1.0 - s[i]) / sf);
   return out;
@@ -106,12 +106,24 @@ void QwenImagePipeline::apply_loras(const std::vector<LoraSpec>& loras) {
   clear_loras(ls);
   active_loras_.clear();
   auto names = dit_->linear_names();
-  for (auto& l : loras) {
-    auto st = apply_lora(l.path, l.scale, dev_.dit, names,
-                         [&](const std::string& n, LoraTarget& t) { return dit_->resolve_lora(n, t); });
-    MX_CHECK(st.applied > 0, "LoRA %s 沒有任何層對應到 Qwen-Image-2.1", l.path.c_str());
-    active_loras_.push_back(l);
+  auto t0 = std::chrono::steady_clock::now();
+  try {
+    for (auto& l : loras) {
+      auto st = apply_lora(l.path, l.scale, dev_.dit, names,
+                           [&](const std::string& n, LoraTarget& t) { return dit_->resolve_lora(n, t); });
+      MX_CHECK(st.applied > 0, "LoRA %s 沒有任何層對應到 Qwen-Image-2.1", l.path.c_str());
+      active_loras_.push_back(l);
+    }
+    dit_->merge_loras(*dit_ctx_);
+  } catch (...) {
+    clear_loras(ls);  // 還原成原始權重，避免殘留一半的 LoRA
+    active_loras_.clear();
+    dit_->merge_loras(*dit_ctx_);
+    throw;
   }
+  if (dit_->compute() != QMode::BF16)
+    MX_INFO("LoRA 載入並併入 %s 權重：%.1f 秒", qmode_name(dit_->compute()),
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
 }
 
 ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn& cb,
@@ -159,7 +171,7 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
   if (cfg) nvel = DevBuf(noise.size() * 4, c.device);
   MX_CUDA(cudaMemcpy(lat.get(), noise.data(), noise.size() * 4, cudaMemcpyHostToDevice));
 
-  auto sig = qwen_image_sigmas(r.steps, N);
+  auto sig = qwen_image_sigmas(r.steps, N, r.shift_terminal);
   for (int i = 0; i < r.steps; i++) {
     report("denoise", i, r.steps);
     dit_->forward(c, pos, lat.as<float>(), sig[i], vel.as<float>());

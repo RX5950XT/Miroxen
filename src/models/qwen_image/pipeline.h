@@ -53,6 +53,6 @@ class QwenImagePipeline {
 
 // FlowMatch Euler（Qwen-Image-2.1 設定：exponential dynamic shift + shift_terminal 0.02）。
 // 回傳 steps+1 個 sigma（最後一個為 0）。
-std::vector<float> qwen_image_sigmas(int steps, int64_t image_tokens);
+std::vector<float> qwen_image_sigmas(int steps, int64_t image_tokens, bool shift_terminal = true);
 
 }  // namespace mx

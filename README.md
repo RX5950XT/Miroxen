@@ -35,3 +35,14 @@ GGUF 量化只決定權重檔大小；`--compute` 決定 DiT 實際用哪種 ten
 | bf16 | 41 TFLOPS | 40.4 秒 | 267 秒 | 基準 |
 | fp8（預設） | 152 TFLOPS | 18.7 秒 | 142 秒 | 幾乎相同（圖 33.5 dB） |
 | fp4 | 293 TFLOPS | 16.7 秒 | 108 秒 | 乾淨，但構圖與提示詞遵循度會變 |
+
+## LoRA
+
+LoRA 放在 `models/loras/`，命令列用 `--lora 檔名:強度`，API／面板用 `loras` 欄位。支援 diffusers／PEFT（`lora_A/lora_B`）
+與 kohya（`lora_down/lora_up` + `alpha`）命名。fp8／fp4 模式下，換 LoRA 時會把它直接併進量化權重（約 2–3 秒），
+之後出圖不會變慢；bf16 模式則每步即時計算。
+
+實測：
+- [Zenless Zone Zero Chibi](https://huggingface.co/wesjos/Qwen-Image2.1-ZenlessZoneZeroChibi-Lora)（畫風，rank 16）：192 層全部對應。
+- [Turbo8](https://huggingface.co/chriswritescode/Turbo8-LoRA-Qwen-Image-2.1)（8 步加速，rank 128，含調變與時間嵌入層）：227 層全部對應。
+  用法 `--steps 8 --shift-terminal 0`（API：`"steps":8,"shift_terminal":false`，不設 `cfg_scale`），1024² 約 8.4 秒。

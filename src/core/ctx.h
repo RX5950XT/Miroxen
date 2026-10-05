@@ -45,6 +45,6 @@ void gemm_bf16(Ctx& c, const bf16* X, int64_t ldx, const bf16* W, int64_t ldw, v
                bool y_f32, int64_t ldy, int64_t M, int64_t N, int64_t K, float beta = 0.f,
                float alpha = 1.f);
 void gemm_f32(Ctx& c, const float* X, int64_t ldx, const float* W, int64_t ldw, float* Y,
-              int64_t ldy, int64_t M, int64_t N, int64_t K, float beta = 0.f);
+              int64_t ldy, int64_t M, int64_t N, int64_t K, float beta = 0.f, float alpha = 1.f);
 
 }  // namespace mx

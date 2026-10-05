@@ -70,6 +70,8 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 
 影片幀數欄位是 `num_frames`（也接受 `frames`），5 到 361，預設 56。
 
+`shift_terminal` 只用於圖像，布林值，預設 `true`（官方排程：最後一步拉伸到 0.02）。步數蒸餾 LoRA（例如 Turbo8）要設 `false`。
+
 `compute` 是 DiT 的運算精度，可省略（用伺服器啟動時的 `--compute`，預設 `fp8`）：`bf16`（最準）、`fp8`（MXFP8，約快 2 倍、畫質幾乎不變）、`fp4`（NVFP4，最快）。`fp8`／`fp4` 需要 Blackwell 以上的顯卡，不支援時自動退回 `bf16`。和目前載入的精度不同時會重新載入模型（Qwen-Image 約 10 秒、H3 約 40 秒）。
 
 ## 圖像

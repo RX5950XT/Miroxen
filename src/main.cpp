@@ -1,5 +1,6 @@
 // Miroxen 命令列：
 //   miroxen image  -p "prompt" [-o out.png] [-W 1024 -H 1024] [--steps 40] [--seed N] [--lora file:scale]
+//                  [--shift-terminal 0]（步數蒸餾 LoRA 用，例如 Turbo8：--steps 8 --shift-terminal 0）
 //   miroxen video  -p "prompt" [-W 864 -H 480] [--frames 56] [--steps 30]
 //   miroxen serve  [--port 8188] [--host 127.0.0.1] [--api-key KEY] [--fake]
 // 模型路徑預設在 models/ 底下，可用 --qi-dit / --qi-te / --qi-vae / --qi-tok 覆寫。
@@ -73,6 +74,7 @@ int cmd_image(const Args& a) {
   r.steps = a.geti("--steps", 40);
   r.cfg_scale = float(std::atof(a.get("--cfg", "1").c_str()));
   r.seed = a.has("--seed") ? std::atoll(a.get("--seed").c_str()) : -1;
+  r.shift_terminal = a.get("--shift-terminal", "1") != "0";
   for (auto& l : a.loras) {
     size_t c = l.rfind(':');
     LoraSpec s;

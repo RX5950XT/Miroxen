@@ -68,6 +68,28 @@ void DeviceWeights::quantize(Linear& l, QMode m) {
   l.qw = std::move(q);
 }
 
+void DeviceWeights::merge_loras(Ctx& c, Linear& l) {
+  if (!l.qw || !l.qw->q.get() || (l.loras.empty() && !l.qw->merged)) return;
+  c.use();
+  const WeightRef& r = st_.get(l.name + ".weight");
+  DevBuf raw = upload_raw(r, dev_), tmp(size_t(l.in) * l.out * sizeof(bf16), dev_);
+  dequant_to_bf16(raw.get(), r.type, l.in * l.out, tmp.as<bf16>(), c.stream);
+  const float one = 1.f;
+  for (auto& d : l.loras) {
+    if (d->f32) continue;
+    // row-major W[out,in] += s·B[out_len,r]·A[r,in]；column-major 下是 Wᵀ[in,out] += Aᵀ[in,r]·Bᵀ[r,out]。
+    MX_BLAS(cublasGemmEx(c.blas, CUBLAS_OP_N, CUBLAS_OP_N, int(l.in), int(d->out_len), int(d->rank), &d->scale,
+                         d->A.get(), CUDA_R_16BF, int(l.in), d->B.get(), CUDA_R_16BF, int(d->rank), &one,
+                         tmp.as<bf16>() + d->out_off * l.in, CUDA_R_16BF, int(l.in), CUBLAS_COMPUTE_32F,
+                         CUBLAS_GEMM_DEFAULT));
+  }
+  quantize_blockscaled(l.qw->mode, tmp.as<bf16>(), l.in, l.out, l.in, l.qw->mat(), c.stream);
+  c.sync();
+  for (auto& d : l.loras)
+    if (!d->f32) d->A = DevBuf(), d->B = DevBuf();  // 已併入，釋放 VRAM
+  l.qw->merged = !l.loras.empty();
+}
+
 Linear make_linear(DeviceWeights& dw, const std::string& prefix) {
   Linear l;
   l.name = prefix;
@@ -101,6 +123,8 @@ static void linear_one(Ctx& c, const Linear& l, const bf16* x, const QMat* xq, i
     add_bias_bf16(y, l.bias, M, l.out, c.stream);
   }
   for (auto& d : l.loras) {
+    if (l.qw && l.qw->merged) break;
+    MX_CHECK(!d->f32, "%s：LoRA 是 f32 版本", l.name.c_str());
     ArenaScope sc(c.act);
     bf16* t = c.act.alloc_n<bf16>(size_t(M) * d->rank);
     gemm_bf16(c, x, l.in, d->A.as<bf16>(), l.in, t, false, d->rank, M, d->rank, l.in);
@@ -146,7 +170,13 @@ void linear_f32(Ctx& c, const Linear& l, const float* x, int64_t M, float* y) {
   }
   gemm_f32(c, x, l.in, w, l.in, y, l.out, M, l.out, l.in);
   if (l.bias) add_bias_f32(y, l.bias, M, l.out, c.stream);
-  MX_CHECK(l.loras.empty(), "%s：f32 路徑不支援 LoRA", l.name.c_str());
+  for (auto& d : l.loras) {
+    MX_CHECK(d->f32, "%s：LoRA 不是 f32 版本", l.name.c_str());
+    ArenaScope sc(c.act);
+    float* t = c.act.alloc_n<float>(size_t(M) * d->rank);
+    gemm_f32(c, x, l.in, d->A.as<float>(), l.in, t, d->rank, M, d->rank, l.in);
+    gemm_f32(c, t, d->rank, d->B.as<float>(), d->rank, y + d->out_off, l.out, M, d->out_len, d->rank, 1.f, d->scale);
+  }
 }
 
 // ---------------- LoRA ----------------
@@ -171,10 +201,11 @@ static std::string strip_lora_prefix(std::string n) {
   return n;
 }
 
-static DevBuf to_bf16_dev(const WeightRef& r, int dev) {
+static DevBuf to_dev(const WeightRef& r, int dev, bool f32) {
   DevBuf tmp = upload_raw(r, dev);
-  DevBuf out(size_t(r.numel()) * sizeof(bf16), dev);
-  dequant_to_bf16(tmp.get(), r.type, r.numel(), out.as<bf16>(), nullptr);
+  DevBuf out(size_t(r.numel()) * (f32 ? sizeof(float) : sizeof(bf16)), dev);
+  if (f32) dequant_to_f32(tmp.get(), r.type, r.numel(), out.as<float>(), nullptr);
+  else dequant_to_bf16(tmp.get(), r.type, r.numel(), out.as<bf16>(), nullptr);
   MX_CUDA(cudaDeviceSynchronize());
   return out;
 }
@@ -247,8 +278,9 @@ LoraLoadStats apply_lora(const std::string& path, float user_scale, int device,
       alpha = a;
     }
     d->scale = user_scale * alpha / float(r);
-    d->A = to_bf16_dev(*p.down, device);
-    d->B = to_bf16_dev(*p.up, device);
+    d->f32 = t.f32;
+    d->A = to_dev(*p.down, device, t.f32);
+    d->B = to_dev(*p.up, device, t.f32);
     t.linear->loras.push_back(d);
     stats.applied++;
   }

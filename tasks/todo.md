@@ -21,7 +21,7 @@
   - [ ] DiT（AdaLN 預算 / pruned 表）
   - [ ] 影片 VAE 解碼（ViT decoder）+ 音訊 VAE 解碼 + ffmpeg 封裝
   - [ ] 端到端 T2VA；FL2VA
-- [ ] LoRA（diffusers / ComfyUI 命名）
+- [x] LoRA（diffusers / ComfyUI 命名；實測 ZZZ Chibi、Turbo8，fp8/fp4 下併入權重）
 - [ ] 效能：與 sd.cpp 對照、雙卡分工
 - [x] FP8／FP4 區塊縮放運算路徑（Qwen DiT 常駐、H3 串流）
 
@@ -38,5 +38,5 @@
   Qwen 1024²・20 步 40.4 → 18.7（fp8）／16.7 秒（fp4）；H3 864×480・56 幀 267 → 142／108 秒。API 與面板可逐請求選精度。
   INT8 GEMM 計畫由區塊縮放 GEMM 取代（wt/i8gemm 不再需要）。
 - 待做：注意力改 FP8（現為 fp4 模式下最大瓶頸，每步約 0.25 秒）、正規化／silu 與量化融合、文字編碼器（GPU1 3060 Ti 不支援 FP8/FP4）、
-  VAE 加速（Qwen 2048² 9.5 s、H3 124 幀 36 s）、FL2VA、影像編輯、LoRA 實測、sd.cpp 效能對照。
+  VAE 加速（Qwen 2048² 9.5 s、H3 124 幀 36 s）、FL2VA、影像編輯、sd.cpp 效能對照、H3 串流模式的 LoRA 併入。
 

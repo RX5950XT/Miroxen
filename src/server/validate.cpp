@@ -333,6 +333,11 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
     job->image.seed = seed;
     job->image.loras = std::move(loras);
     job->image.compute = compute;
+    if (j.contains("shift_terminal")) {
+      if (!j["shift_terminal"].is_boolean())
+        throw ApiError(400, "invalid_request_error", "invalid_type", "shift_terminal 必須是布林值");
+      job->image.shift_terminal = j["shift_terminal"].get<bool>();
+    }
     read_uploads(opt, j, "images", job->image.ref_images, guard, 10);
   } else {
     int frames = j.contains("num_frames") ? read_int(j, "num_frames", 56) : read_int(j, "frames", 56);

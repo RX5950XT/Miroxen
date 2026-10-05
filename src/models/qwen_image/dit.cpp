@@ -88,6 +88,8 @@ std::vector<std::string> QwenImageDit::linear_names() {
 bool QwenImageDit::resolve_lora(const std::string& name, LoraTarget& t) {
   for (Linear* l : {&img_in_, &txt_in1_, &txt_in2_, &proj_out_})
     if (name == l->name) return t.linear = l, true;
+  for (Linear* l : {&t1_, &t2_, &modulation_, &norm_out_})
+    if (name == l->name) return t.linear = l, t.f32 = true, true;
   const std::string tb = "transformer_blocks.";
   if (name.rfind(tb, 0) != 0) return false;
   size_t dot = name.find('.', tb.size());

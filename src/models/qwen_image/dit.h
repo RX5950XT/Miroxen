@@ -43,6 +43,10 @@ class QwenImageDit {
   std::vector<std::string> linear_names();
   // LoRA 名稱（diffusers / ComfyUI 命名）→ 目標層。
   bool resolve_lora(const std::string& name, LoraTarget& t);
+  // 量化模式下把目前的 LoRA 併進權重（換 LoRA 時呼叫一次）。
+  void merge_loras(Ctx& c) {
+    for (Linear* l : linears()) dw_.merge_loras(c, *l);
+  }
 
  private:
   struct Block {

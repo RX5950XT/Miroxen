@@ -42,9 +42,8 @@ void gemm_bf16(Ctx& c, const bf16* X, int64_t ldx, const bf16* W, int64_t ldw, v
 }
 
 void gemm_f32(Ctx& c, const float* X, int64_t ldx, const float* W, int64_t ldw, float* Y,
-              int64_t ldy, int64_t M, int64_t N, int64_t K, float beta) {
+              int64_t ldy, int64_t M, int64_t N, int64_t K, float beta, float alpha) {
   if (M == 0 || N == 0) return;
-  float alpha = 1.f;
   MX_BLAS(cublasSgemm(c.blas, CUBLAS_OP_T, CUBLAS_OP_N, int(N), int(M), int(K), &alpha, W, int(ldw),
                       X, int(ldx), &beta, Y, int(ldy)));
 }
