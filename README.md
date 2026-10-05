@@ -50,7 +50,9 @@ build\miroxen.exe image -p "把背景換成夜晚的城市" --ref 原圖.png --s
 build\miroxen.exe image -p "..." --qi-vae models\qwen-image-2.1\vae\texture_fix_vae_for_qwen_image_2.1_bf16.safetensors
 ```
 
-實測同一組 latent，紋理明顯乾淨；作者標示 PSNR 略低（32.86 → 32.46），透明圖（RGBA）沒有驗證過，所以預設仍用官方 VAE。
+實測同一組 latent，紋理明顯乾淨；作者標示 PSNR 略低（32.86 → 32.46），所以預設仍用官方 VAE。
+透明圖（RGBA）也能用：同 seed 比較，主體與邊緣幾乎相同（透明度 PSNR 37 dB），而且背景更乾淨
+（官方 VAE 有 66% 背景像素殘留 1–9 的透明度，紋理修正版幾乎全是 0）。
 
 ## 自訂 sigma 節點
 

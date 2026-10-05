@@ -202,6 +202,7 @@ static std::string strip_lora_prefix(std::string n) {
 }
 
 static DevBuf to_dev(const WeightRef& r, int dev, bool f32) {
+  if (!f32 && r.type == GType::BF16) return upload_raw(r, dev);  // 已是 bf16：直接複製，省一次反量化與同步
   DevBuf tmp = upload_raw(r, dev);
   DevBuf out(size_t(r.numel()) * (f32 ? sizeof(float) : sizeof(bf16)), dev);
   if (f32) dequant_to_f32(tmp.get(), r.type, r.numel(), out.as<float>(), nullptr);
