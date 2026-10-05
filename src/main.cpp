@@ -9,6 +9,7 @@
 // --compute bf16|fp8|fp4：DiT 運算精度（fp8/fp4 用 Blackwell 區塊縮放 tensor core）。
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -67,6 +68,21 @@ EngineConfig engine_config(const Args& a) {
   return c;
 }
 
+// --lora 檔案:強度；只給檔名時到 models/loras/ 找。
+std::vector<LoraSpec> lora_specs(const Args& a) {
+  const auto dir = std::filesystem::path(engine_config(a).models_dir) / "loras";
+  std::vector<LoraSpec> out;
+  for (auto& l : a.loras) {
+    size_t c = l.rfind(':');
+    LoraSpec s;
+    s.path = c != std::string::npos && c > 1 ? l.substr(0, c) : l;
+    s.scale = c != std::string::npos && c > 1 ? float(std::atof(l.substr(c + 1).c_str())) : 1.f;
+    if (!std::filesystem::exists(s.path) && std::filesystem::exists(dir / s.path)) s.path = (dir / s.path).string();
+    out.push_back(s);
+  }
+  return out;
+}
+
 int cmd_image(const Args& a) {
   ImageRequest r;
   r.prompt = a.get("-p", a.get("--prompt"));
@@ -84,13 +100,7 @@ int cmd_image(const Args& a) {
   r.cfg_scale = float(std::atof(a.get("--cfg", "1").c_str()));
   r.seed = a.has("--seed") ? std::atoll(a.get("--seed").c_str()) : -1;
   r.shift_terminal = a.get("--shift-terminal", "1") != "0";
-  for (auto& l : a.loras) {
-    size_t c = l.rfind(':');
-    LoraSpec s;
-    s.path = c != std::string::npos && c > 1 ? l.substr(0, c) : l;
-    s.scale = c != std::string::npos && c > 1 ? float(std::atof(l.substr(c + 1).c_str())) : 1.f;
-    r.loras.push_back(s);
-  }
+  r.loras = lora_specs(a);
   auto engine = make_engine(engine_config(a));
   auto res = engine->generate_image(r, [](const Progress& p) {
     if (p.stage == "denoise") std::printf("\r取樣 %d/%d", p.step + 1, p.total), std::fflush(stdout);
@@ -123,13 +133,7 @@ int cmd_video(const Args& a) {
   }
   r.steps = a.geti("--steps", 30);
   r.seed = a.has("--seed") ? std::atoll(a.get("--seed").c_str()) : -1;
-  for (auto& l : a.loras) {
-    size_t c = l.rfind(':');
-    LoraSpec s;
-    s.path = c != std::string::npos && c > 1 ? l.substr(0, c) : l;
-    s.scale = c != std::string::npos && c > 1 ? float(std::atof(l.substr(c + 1).c_str())) : 1.f;
-    r.loras.push_back(s);
-  }
+  r.loras = lora_specs(a);
   auto engine = make_engine(engine_config(a));
   auto res = engine->generate_video(r, [](const Progress& p) {
     if (p.stage == "denoise" || p.stage == "decode_video")

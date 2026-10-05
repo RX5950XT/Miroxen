@@ -87,9 +87,12 @@ GGUF 量化只決定權重檔大小；`--compute` 決定 DiT 實際用哪種 ten
 
 | 精度 | 矩陣乘法 | Qwen-Image 1024²・20 步 | H3 864×480・56 幀・30 步 | 畫質 |
 |---|---|---|---|---|
-| bf16 | 41 TFLOPS | 40.4 秒 | 267 秒 | 基準 |
-| fp8（預設） | 152 TFLOPS | 16.5 秒 | 110 秒 | 幾乎相同（圖 31.1 dB） |
-| fp4 | 293 TFLOPS | 11.9 秒 | 93.5 秒 | 乾淨，但構圖與提示詞遵循度會變 |
+| bf16 | 41 TFLOPS | 35.0 秒 | 267 秒 | 基準 |
+| fp8（預設） | 152 TFLOPS | 14.0 秒 | 110 秒 | 幾乎相同（圖 31.1 dB） |
+| fp4 | 293 TFLOPS | 9.7 秒 | 93.5 秒 | 乾淨，但構圖與提示詞遵循度會變 |
+
+Qwen 的 VAE 解碼改用自寫卷積核心（不展開 im2col），2048² 從 8.3 秒降到 2.4 秒。
+fp8／fp4 模式下影片 VAE 解碼器的 FFN 也用 FP8（PSNR 40.8 dB）。
 
 fp8／fp4 模式下注意力也改用 INT8（Q·K）＋ FP8（P·V）tensor core（SageAttention2 做法），比 bf16 注意力快 2.4–2.9 倍，
 誤差約 0.4–1.4%。
@@ -99,7 +102,7 @@ H3 的 DiT（約 10 GiB）與 32B 文字編碼器（約 14 GiB）都是逐層直
 
 ## LoRA
 
-LoRA 放在 `models/loras/`，命令列用 `--lora 檔名:強度`，API／面板用 `loras` 欄位。支援 diffusers／PEFT（`lora_A/lora_B`）
+LoRA 放在 `models/loras/`，命令列用 `--lora 檔名:強度`（只給檔名會到 `models/loras/` 找），API／面板用 `loras` 欄位。支援 diffusers／PEFT（`lora_A/lora_B`）
 與 kohya（`lora_down/lora_up` + `alpha`）命名。fp8／fp4 模式下，換 LoRA 時會把它直接併進量化權重（約 2–3 秒），
 之後出圖不會變慢；bf16 模式則每步即時計算。H3 的 fp8 串流模式則是在搬運權重時順手併入，不佔取樣時間。
 
@@ -120,4 +123,4 @@ MiniMax-H3 加速 LoRA（[lightx2v/Minimax-h3-Turbo](https://huggingface.co/ligh
 
 - 縮放用檔案 metadata 的 `alpha`（8，rank 128 → 8/128）。
 - diffusers 命名的 `ff.net.0.proj` 輸出是 [value; gate]，載入時自動對調成原始 checkpoint 的 [gate; value]。
-- 實測 864×480・56 幀：8 步加速＋首尾幀約 55 秒（原版 30 步約 144 秒）；文生影片 8 步約 49 秒（DiT 30 秒）。
+- 實測 864×480・56 幀：8 步加速＋首尾幀約 55 秒（原版 30 步約 144 秒）；文生影片 8 步約 42 秒（DiT 28 秒、影片解碼 9 秒）。
