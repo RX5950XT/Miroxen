@@ -93,6 +93,8 @@ GGUF 量化只決定權重檔大小；`--compute` 決定 DiT 實際用哪種 ten
 | fp8（預設） | 152 TFLOPS | 14.0 秒 | 110 秒 | 幾乎相同（圖 31.1 dB） |
 | fp4 | 293 TFLOPS | 9.7 秒 | 93.5 秒 | 乾淨，但構圖與提示詞遵循度會變 |
 
+以上是 GPU 沒有其他程式時量的；同時開遊戲、動態桌布等吃顯卡的程式，實測會慢 15–40%。
+
 Qwen 的 VAE 解碼改用自寫卷積核心（不展開 im2col），2048² 從 8.3 秒降到 2.4 秒。
 fp8／fp4 模式下影片 VAE 解碼器的 FFN 也用 FP8（PSNR 40.8 dB）。
 
@@ -105,7 +107,7 @@ H3 的 DiT（約 10 GiB）與 32B 文字編碼器（約 14 GiB）都是逐層直
 ## LoRA
 
 LoRA 放在 `models/loras/`，命令列用 `--lora 檔名:強度`（只給檔名會到 `models/loras/` 找），API／面板用 `loras` 欄位。支援 diffusers／PEFT（`lora_A/lora_B`）
-與 kohya（`lora_down/lora_up` + `alpha`）命名。fp8／fp4 模式下，換 LoRA 時會把它直接併進量化權重（約 2–3 秒），
+與 kohya（`lora_down/lora_up` + `alpha`）命名。fp8／fp4 模式下，換 LoRA 時會把它直接併進量化權重（1.3 GB 的 rank 256 約 3 秒），
 之後出圖不會變慢；bf16 模式則每步即時計算。H3 的 fp8 串流模式則是在搬運權重時順手併入，不佔取樣時間。
 
 Qwen-Image 實測：

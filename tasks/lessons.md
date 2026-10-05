@@ -32,6 +32,8 @@
 - 自寫小測試量指令速度時記得選對卡：CUDA 預設 device 0 是 3060 Ti（見上），在 sm_86 上跑 sm_120 cubin 會報 no kernel image。
 - FP8 注意力（SageAttention2 式）第一版 1 CTA/SM 只到 67 TFLOPS；換全速 MMA 到 82，`__launch_bounds__(256, 2)` 壓到 128 暫存器後 105。
   改 exp／int→float 轉換沒有幫助，瓶頸是 MMA 速率與佔用率。
+- 後來發現 256 執行緒×2 CTA 壓到 128 暫存器時 D=128 會 spill；改 128 執行緒×3 CTA（168 暫存器）不 spill，再快 2–7%。
+  調 `__launch_bounds__` 後用 `-Xptxas -v` 看暫存器與 spill。
 
 ## 建置
 - 改了 class 成員或 struct（例如 BlockStreamer、ImageRequest）後出現「invalid resource handle」、0xc0000409、日誌數字
@@ -53,3 +55,11 @@
 ## 數值比對的門檻
 - 和 fp32 參考差幾 % 時先拿官方 bf16 跑一次對照，再判斷是不是 bug：Qwen3-VL 視覺塔官方 bf16 對 fp32 本身就差 5.5%，
   圖片列有超大激活值通道（1838、2276）差到 15%。我們的數字和官方 bf16 同量級就是精度，不是錯。
+
+## 效能量測（2026-10-05）
+- 量速度前先 `nvidia-smi --query-compute-apps=pid,process_name --format=csv` 看 GPU0 有沒有遊戲、動態桌布、Broadcast 在跑。
+  有的話只能做同時段「改前／改後交錯」A/B，數字不能和舊表比（H3 fp8 從 110 變 129 秒就是這樣，不是退步）。
+- 沒有系統管理員權限也能量冷快取：`robocopy <來源> <目的> <檔名> /J` 以不經快取的 I/O 複製，新檔內容不在系統快取。
+- 宣稱「輸出位元相同」前，先拿舊版同 seed 跑兩次：fp8 出圖本來就不是決定性的（平均每通道差約 0.8）。
+- 子代理的優化：先看收益對複雜度。收益 <1% 或 <1 秒卻要幾百行的不合併，改從它的量測裡挑最小改法
+  （LoRA 載入：Grok 240 行省 0.75 秒；只改 bf16 直接上傳 1 行就省 0.5 秒）。
