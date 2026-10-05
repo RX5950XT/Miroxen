@@ -87,11 +87,16 @@ int read_int(const json& j, const char* key, int fallback) {
   return j[key].get<int>();
 }
 
+// size 為 "auto" 時 w = h = 0（由呼叫端決定是否允許：編輯依參考圖、影片依關鍵幀或官方畫布）。
 void parse_wh(const json& j, int& w, int& h) {
   if (j.contains("size")) {
     if (!j["size"].is_string())
       throw ApiError(400, "invalid_request_error", "invalid_size", "size 必須是字串");
     auto s = j["size"].get<std::string>();
+    if (s == "auto") {
+      w = h = 0;
+      return;
+    }
     auto x = s.find('x');
     if (x == std::string::npos) x = s.find('X');
     auto a = x == std::string::npos ? std::string() : s.substr(0, x);
@@ -116,10 +121,11 @@ void parse_wh(const json& j, int& w, int& h) {
 }
 
 void check_dims(int w, int h, int max_side) {
-  auto bad = [&](int v) { return v < 256 || v > max_side || v % 16 != 0; };
+  if (w == 0 && h == 0) return;  // auto
+  auto bad = [&](int v) { return v < 256 || v > max_side || v % 32 != 0; };
   if (bad(w) || bad(h))
     throw ApiError(400, "invalid_request_error", "invalid_size",
-                   strf("寬與高必須是 16 的倍數，且介於 256 與 %d", max_side));
+                   strf("寬與高必須是 32 的倍數，且介於 256 與 %d", max_side));
 }
 
 std::string job_type(const json& j, const std::string& forced) {
@@ -233,6 +239,51 @@ void read_uploads(const ServerOptions& opt, const json& j, const char* key, std:
   }
 }
 
+// 影片／音訊上傳：不解碼（之後由 ffprobe 檢查），副檔名取自 data URL 的 MIME。
+std::filesystem::path save_media(const ServerOptions& opt, const std::string& encoded, TempGuard& guard) {
+  std::vector<uint8_t> raw;
+  try {
+    raw = b64_decode(payload_b64(encoded));
+  } catch (const std::exception& e) {
+    throw ApiError(400, "invalid_request_error", "invalid_media", e.what());
+  }
+  if (raw.size() < 64) throw ApiError(400, "invalid_request_error", "invalid_media", "媒體檔太小或是空的");
+  std::string ext = ".bin";
+  static const std::pair<const char*, const char*> kMime[] = {
+      {"video/mp4", ".mp4"}, {"video/webm", ".webm"}, {"video/quicktime", ".mov"}, {"audio/wav", ".wav"},
+      {"audio/x-wav", ".wav"}, {"audio/mpeg", ".mp3"}, {"audio/mp4", ".m4a"}, {"audio/ogg", ".ogg"},
+      {"audio/flac", ".flac"}};
+  for (auto& [mime, e] : kMime)
+    if (encoded.rfind(std::string("data:") + mime, 0) == 0) ext = e;
+  static std::atomic<uint64_t> seq{1};
+  auto path = utf8_path(opt.out_dir) / "tmp" / ("media_" + std::to_string(seq.fetch_add(1)) + ext);
+  guard.paths.push_back(path);
+  try {
+    write_file(path, raw.data(), raw.size());
+  } catch (const std::exception& e) {
+    throw ApiError(500, "server_error", "write_failed", e.what());
+  }
+  return path;
+}
+
+// Ref2VA 參考：[{ "type": "image"|"video"|"audio", "data": base64 或 data URL }, ...]，依提示詞順序。
+void read_references(const ServerOptions& opt, const json& j, std::vector<MediaRef>& out, TempGuard& guard) {
+  if (!j.contains("references") || j["references"].is_null()) return;
+  if (!j["references"].is_array() || j["references"].size() > 12)
+    throw ApiError(400, "invalid_request_error", "invalid_references", "references 必須是最多 12 個元素的陣列");
+  for (auto& it : j["references"]) {
+    if (!it.is_object() || !it.contains("type") || !it["type"].is_string() || !it.contains("data") ||
+        !it["data"].is_string())
+      throw ApiError(400, "invalid_request_error", "invalid_references", "每個參考需要字串欄位 type 與 data");
+    auto kind = it["type"].get<std::string>();
+    if (kind != "image" && kind != "video" && kind != "audio")
+      throw ApiError(400, "invalid_request_error", "invalid_references", "參考 type 只能是 image、video 或 audio");
+    auto data = it["data"].get<std::string>();
+    auto path = kind == "image" ? save_upload(opt, data, guard) : save_media(opt, data, guard);
+    out.push_back({kind, path.string()});
+  }
+}
+
 void read_one_upload(const ServerOptions& opt, const json& j, const char* key, std::string& path, TempGuard& guard) {
   if (!j.contains(key) || j[key].is_null()) return;
   if (!j[key].is_string())
@@ -339,6 +390,17 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
       job->image.shift_terminal = j["shift_terminal"].get<bool>();
     }
     read_uploads(opt, j, "images", job->image.ref_images, guard, 10);
+    if (w == 0 && job->image.ref_images.empty())
+      throw ApiError(400, "invalid_request_error", "invalid_size", "size 為 auto 時需要參考圖 images");
+    if (j.contains("sigmas")) {
+      if (!j["sigmas"].is_array() || j["sigmas"].empty() || j["sigmas"].size() > 200)
+        throw ApiError(400, "invalid_request_error", "invalid_sigmas", "sigmas 必須是 1～200 個數字的陣列");
+      for (auto& v : j["sigmas"]) {
+        if (!v.is_number() || !(v.get<double>() > 0.0 && v.get<double>() <= 1.0))
+          throw ApiError(400, "invalid_request_error", "invalid_sigmas", "sigmas 每個值都必須在 (0, 1]");
+        job->image.sigmas.push_back(v.get<float>());
+      }
+    }
   } else {
     int frames = j.contains("num_frames") ? read_int(j, "num_frames", 56) : read_int(j, "frames", 56);
     if (frames < 5 || frames > 361)
@@ -353,6 +415,25 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
     job->video.compute = compute;
     read_one_upload(opt, j, "first_frame", job->video.first_frame, guard);
     read_one_upload(opt, j, "last_frame", job->video.last_frame, guard);
+    read_references(opt, j, job->video.references, guard);
+    if (!job->video.references.empty() && (!job->video.first_frame.empty() || !job->video.last_frame.empty()))
+      throw ApiError(400, "invalid_request_error", "invalid_references", "references 不能和 first_frame／last_frame 同時使用");
+    if (j.contains("video_shift")) {
+      if (!j["video_shift"].is_number() || !(j["video_shift"].get<double>() >= 0.5 && j["video_shift"].get<double>() <= 50))
+        throw ApiError(400, "invalid_request_error", "invalid_shift", "video_shift 必須是 0.5～50 的數字");
+      job->video.video_shift = j["video_shift"].get<float>();
+    }
+    if (j.contains("ref_image_short_edge")) {
+      int e = read_int(j, "ref_image_short_edge", 2048);
+      if (e < 256 || e > 4096)
+        throw ApiError(400, "invalid_request_error", "invalid_references", "ref_image_short_edge 必須介於 256 與 4096");
+      job->video.ref_image_short_edge = e;
+    }
+    if (j.contains("ref_native_canvas")) {
+      if (!j["ref_native_canvas"].is_boolean())
+        throw ApiError(400, "invalid_request_error", "invalid_type", "ref_native_canvas 必須是布林值");
+      job->video.ref_native_canvas = j["ref_native_canvas"].get<bool>();
+    }
   }
   job->temps = std::move(guard.paths);
   guard.keep = true;

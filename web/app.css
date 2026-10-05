@@ -263,3 +263,11 @@ details textarea { margin-top: 0.4rem; width: 100%; }
     transition: none !important;
   }
 }
+
+/* 進階排程、參考生成清單 */
+#sched-wrap .field { margin-top: 0.5rem; }
+#sched-wrap .field input[type="text"] { width: 100%; }
+.check { display: flex; align-items: center; gap: 0.45rem; margin-top: 0.5rem; font-size: var(--fs-0); color: var(--ink); cursor: pointer; }
+.check input { accent-color: var(--ink); width: 1.05rem; height: 1.05rem; }
+.ref-tag { font-family: ui-monospace, monospace; color: var(--ink); margin-right: 0.4rem; }
+.ref-list li .ref-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

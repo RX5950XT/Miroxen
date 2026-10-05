@@ -224,6 +224,22 @@ void test_validation(httplib::Client& cli) {
   auto st = image_body();
   st["shift_terminal"] = "no";
   expect_code(post_json(cli, "/v1/images/generations", st), 400, "invalid_type");
+  auto sig = image_body();
+  sig["sigmas"] = json::array({1.0, 1.5});
+  expect_code(post_json(cli, "/v1/images/generations", sig), 400, "invalid_sigmas");
+  auto autosize = image_body();
+  autosize["size"] = "auto";  // 沒有參考圖時不能 auto
+  expect_code(post_json(cli, "/v1/images/generations", autosize), 400, "invalid_size");
+  bad_size["size"] = "272x256";  // 16 的倍數但不是 32 的倍數
+  expect_code(post_json(cli, "/v1/images/generations", bad_size), 400, "invalid_size");
+  auto refs = json{{"type", "video"}, {"model", "minimax-h3"}, {"prompt", "海"}, {"size", "864x480"},
+                   {"references", json::array({json{{"type", "gif"}, {"data", "AAAA"}}})}};
+  expect_code(post_json(cli, "/v1/videos/generations", refs), 400, "invalid_references");
+  refs["references"] = "x";
+  expect_code(post_json(cli, "/v1/videos/generations", refs), 400, "invalid_references");
+  refs.erase("references");
+  refs["video_shift"] = 0;
+  expect_code(post_json(cli, "/v1/videos/generations", refs), 400, "invalid_shift");
   auto n = image_body();
   n["n"] = 2;
   expect_code(post_json(cli, "/v1/images/generations", n), 400, "invalid_n");

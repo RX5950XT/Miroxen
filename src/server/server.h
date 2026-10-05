@@ -16,7 +16,7 @@ struct ServerOptions {
   std::string web_dir = "web";
   std::string out_dir = "out";
   std::string lora_dir = "models/loras";
-  size_t max_body_mb = 64;  // 0 表示不限制本文大小
+  size_t max_body_mb = 256;  // 0 表示不限制本文大小（參考影片以 base64 上傳，預設放寬到 256 MB）
 };
 
 // 阻塞到 Server::stop()（Ctrl+C 會呼叫它）。失敗回 1。

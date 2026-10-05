@@ -35,6 +35,7 @@
       <fieldset>
         <legend>尺寸</legend>
         <div id="sizes" class="sizes" role="group" aria-label="尺寸"></div>
+        <p id="size-help" class="help" hidden></p>
       </fieldset>
 
       <div class="grid2">
@@ -46,6 +47,10 @@
         </label>
         <label class="field" id="frames-wrap" hidden>幀數
           <input id="frames" type="number" min="5" max="361" value="56" inputmode="numeric">
+        </label>
+        <label class="field" id="shift-wrap" hidden>影片 shift
+          <input id="video-shift" type="number" min="0.5" max="50" step="0.5" value="12" aria-describedby="shift-help">
+          <span id="shift-help" class="help">官方 12；LightX2V 8 步加速 LoRA 用 6。</span>
         </label>
         <label class="field seed-field">種子
           <span class="seed-row">
@@ -63,6 +68,19 @@
           <span id="compute-help" class="help">fp8／fp4 需要 RTX 50 系列；切換時會重新載入模型。</span>
         </label>
       </div>
+
+      <details id="sched-wrap">
+        <summary>取樣排程（進階）</summary>
+        <label class="field">自訂 sigma 節點
+          <input id="sigmas" type="text" inputmode="decimal" placeholder="例如 1, 0.9375, 0.875, 0.75, 0.5, 0.25"
+                 aria-describedby="sigmas-help">
+          <span id="sigmas-help" class="help">留空用預設排程。填了以後步數＝節點數；Viggle 6 步加速 LoRA 用上面的例子並取消下面的勾選。</span>
+        </label>
+        <label class="check">
+          <input id="shift-terminal" type="checkbox" checked>
+          尾端拉伸到 0.02（官方預設；步數蒸餾 LoRA 要關掉）
+        </label>
+      </details>
 
       <div id="frame-files" class="frame-files" hidden>
         <label class="field">首幀
@@ -86,6 +104,17 @@
           </label>
         </div>
         <ul id="ref-list" class="ref-list"></ul>
+      </div>
+
+      <div id="vrefs-wrap" hidden>
+        <div class="drop" id="vdrop">
+          <label>
+            <input id="vref-input" class="file-input" type="file" accept="image/png,image/jpeg,video/*,audio/*" multiple>
+            參考生成：拖放圖片、影片或音訊（依序，最多 12 個）
+          </label>
+        </div>
+        <p class="help">提示詞裡用清單上的標籤指稱，例如「&lt;Picture 1&gt; 的狗在海邊跑」。不能和首尾幀同時使用；影片自帶的音軌也會一起參考。</p>
+        <ul id="vref-list" class="ref-list"></ul>
       </div>
 
       <p id="form-error" class="error" role="alert" hidden></p>

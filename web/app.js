@@ -9,11 +9,13 @@ const IMAGE_SIZES = [
   ["2:3", 1696, 2528],
   ["16:9", 2752, 1536],
   ["9:16", 1536, 2752],
+  ["依參考圖比例", 0, 0],
 ];
 const VIDEO_SIZES = [
   ["864×480", 864, 480],
-  ["1280×720", 1280, 720],
+  ["1344×768（官方）", 1344, 768],
   ["480×864", 480, 864],
+  ["自動", 0, 0],
 ];
 const STEP_DEFAULT = { image: 40, video: 30 };
 const STATUS_TEXT = {
@@ -30,6 +32,7 @@ const state = {
   mode: "image",
   size: 0,
   refs: [],
+  vrefs: [],
   models: [],
   jobs: [],
   activeId: null,
@@ -105,10 +108,72 @@ function renderSizes() {
       state.size = i;
       renderSizes();
       const s = selectedSize();
-      $("skeleton").style.aspectRatio = s.w + " / " + s.h;
+      if (s.w) $("skeleton").style.aspectRatio = s.w + " / " + s.h;
     });
     box.append(button);
   });
+  const s = selectedSize(), help = $("size-help");
+  help.hidden = s.w !== 0;
+  help.textContent = state.mode === "image"
+    ? "依最後一張參考圖的比例，約 1024×1024 像素。"
+    : "有首幀時依首幀比例、否則 16:9，短邊 768（官方畫布，較慢）。";
+}
+
+// 參考生成（Ref2VA）：依序的圖片／影片／音訊，標籤依種類各自編號（同提示詞裡的寫法）。
+const VREF_TAG = { image: "Picture", video: "Video", audio: "Audio" };
+const VREF_LIMIT = { image: 9, video: 3, audio: 3 };
+
+function vrefKind(file) {
+  const t = file.type || "";
+  if (t.startsWith("image/") || /\.(png|jpe?g)$/i.test(file.name)) return "image";
+  if (t.startsWith("video/") || /\.(mp4|mov|webm|mkv)$/i.test(file.name)) return "video";
+  if (t.startsWith("audio/") || /\.(wav|mp3|m4a|flac|ogg)$/i.test(file.name)) return "audio";
+  return "";
+}
+
+function renderVrefs() {
+  const list = $("vref-list");
+  list.replaceChildren();
+  const count = { image: 0, video: 0, audio: 0 };
+  state.vrefs.forEach((ref, index) => {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.className = "ref-name";
+    const tag = document.createElement("span");
+    tag.className = "ref-tag";
+    tag.textContent = "<" + VREF_TAG[ref.kind] + " " + ++count[ref.kind] + ">";
+    label.append(tag, document.createTextNode(ref.name));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "移除";
+    remove.setAttribute("aria-label", "移除 " + ref.name);
+    remove.addEventListener("click", () => {
+      state.vrefs.splice(index, 1);
+      renderVrefs();
+    });
+    li.append(label, remove);
+    list.append(li);
+  });
+}
+
+async function addVrefs(fileList) {
+  for (const file of Array.from(fileList || [])) {
+    const kind = vrefKind(file);
+    if (!kind) {
+      showFormError("「" + file.name + "」不是圖片、影片或音訊");
+      continue;
+    }
+    if (state.vrefs.length >= 12) {
+      showFormError("參考最多 12 個");
+      break;
+    }
+    if (state.vrefs.filter((r) => r.kind === kind).length >= VREF_LIMIT[kind]) {
+      showFormError(VREF_TAG[kind] + " 參考最多 " + VREF_LIMIT[kind] + " 個");
+      continue;
+    }
+    state.vrefs.push({ kind, name: file.name, url: await readFile(file) });
+  }
+  renderVrefs();
 }
 
 function applyMode() {
@@ -120,6 +185,9 @@ function applyMode() {
   $("refs-wrap").hidden = !image;
   $("frames-wrap").hidden = image;
   $("frame-files").hidden = image;
+  $("shift-wrap").hidden = image;
+  $("sched-wrap").hidden = !image;
+  $("vrefs-wrap").hidden = image;
   renderSizes();
   const s = selectedSize();
   $("skeleton").style.aspectRatio = s.w + " / " + s.h;
@@ -511,7 +579,7 @@ async function onSubmit(ev) {
   const model = modelId(kind);
   if (!model) return showFormError("沒有可用的模型");
   const size = selectedSize();
-  const body = { type: kind, model, prompt, size: size.w + "x" + size.h, steps, seed };
+  const body = { type: kind, model, prompt, size: size.w ? size.w + "x" + size.h : "auto", steps, seed };
   try {
     if (kind === "image") {
       const cfg = Number($("cfg").value);
@@ -520,6 +588,14 @@ async function onSubmit(ev) {
       const negative = $("negative").value.trim();
       if (negative) body.negative_prompt = negative;
       if (state.refs.length) body.images = state.refs.map((ref) => ref.url);
+      if (!size.w && !state.refs.length) return showFormError("「依參考圖比例」需要先加參考圖");
+      const sigText = $("sigmas").value.trim();
+      if (sigText) {
+        const sig = sigText.split(/[,，\s]+/).filter(Boolean).map(Number);
+        if (!sig.every((v) => Number.isFinite(v) && v > 0 && v <= 1)) return showFormError("sigma 節點必須是 0 到 1 之間的數字");
+        body.sigmas = sig;
+      }
+      if (!$("shift-terminal").checked) body.shift_terminal = false;
     } else {
       const frames = integerIn($("frames").value, 5, 361);
       if (frames == null) return showFormError("幀數必須是 5 到 361 的整數");
@@ -528,6 +604,14 @@ async function onSubmit(ev) {
       const last = $("last-frame").files[0];
       if (first) body.first_frame = await readFile(first);
       if (last) body.last_frame = await readFile(last);
+      const shift = Number($("video-shift").value);
+      if (!Number.isFinite(shift) || shift < 0.5 || shift > 50) return showFormError("影片 shift 必須介於 0.5 與 50");
+      if (shift !== 12) body.video_shift = shift;
+      if (state.vrefs.length) {
+        if (first || last) return showFormError("參考生成不能和首尾幀同時使用");
+        if (state.vrefs.every((r) => r.kind === "audio")) return showFormError("音訊參考需要搭配圖片或影片");
+        body.references = state.vrefs.map((r) => ({ type: r.kind, data: r.url }));
+      }
     }
     const loras = selectedLoras();
     if (loras.length) body.loras = loras;
@@ -575,6 +659,24 @@ function bind() {
     addFiles(ev.target.files).then(() => {
       ev.target.value = "";
     });
+  });
+  $("vref-input").addEventListener("change", (ev) => {
+    addVrefs(ev.target.files).then(() => {
+      ev.target.value = "";
+    });
+  });
+  const vdrop = $("vdrop");
+  ["dragenter", "dragover"].forEach((name) => {
+    vdrop.addEventListener(name, (ev) => {
+      ev.preventDefault();
+      vdrop.classList.add("hot");
+    });
+  });
+  vdrop.addEventListener("dragleave", () => vdrop.classList.remove("hot"));
+  vdrop.addEventListener("drop", (ev) => {
+    ev.preventDefault();
+    vdrop.classList.remove("hot");
+    addVrefs(ev.dataTransfer.files);
   });
   const drop = $("drop");
   ["dragenter", "dragover"].forEach((name) => {
