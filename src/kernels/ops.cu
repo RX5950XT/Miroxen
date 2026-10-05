@@ -245,10 +245,28 @@ void silu_inplace_f32(float* x, int64_t n, cudaStream_t s) {
   launch_map(n, s, [=] __device__(int64_t i) { x[i] = x[i] / (1.f + __expf(-x[i])); });
 }
 
+// 每個 block 處理一列的一段欄（2D grid，免去逐元素 64 位元取餘數）；dim 為偶數時一次兩個 bf16。
+__global__ void add_bias_bf16_kernel(bf16* __restrict__ y, const float* __restrict__ bias, int64_t dim) {
+  bf16* row = y + int64_t(blockIdx.y) * dim;
+  int64_t j = (int64_t(blockIdx.x) * blockDim.x + threadIdx.x) * 2;
+  if (dim % 2 == 0) {
+    if (j >= dim) return;
+    __nv_bfloat162 v = *reinterpret_cast<__nv_bfloat162*>(row + j);
+    float2 f = __bfloat1622float2(v);
+    *reinterpret_cast<__nv_bfloat162*>(row + j) = __floats2bfloat162_rn(f.x + bias[j], f.y + bias[j + 1]);
+  } else {
+    for (int64_t k = j; k < j + 2 && k < dim; k++) row[k] = __float2bfloat16(__bfloat162float(row[k]) + bias[k]);
+  }
+}
+
 void add_bias_bf16(bf16* y, const float* bias, int64_t rows, int64_t dim, cudaStream_t s) {
-  launch_map(rows * dim, s, [=] __device__(int64_t i) {
-    y[i] = __float2bfloat16(__bfloat162float(y[i]) + bias[i % dim]);
-  });
+  if (rows <= 0) return;
+  const unsigned bx = unsigned((dim + 511) / 512);
+  for (int64_t r0 = 0; r0 < rows; r0 += 65535) {
+    const int64_t n = rows - r0 < 65535 ? rows - r0 : 65535;
+    add_bias_bf16_kernel<<<dim3(bx, unsigned(n)), 256, 0, s>>>(y + r0 * dim, bias, dim);
+    MX_KCHECK();
+  }
 }
 
 void add_bias_f32(float* y, const float* bias, int64_t rows, int64_t dim, cudaStream_t s) {
