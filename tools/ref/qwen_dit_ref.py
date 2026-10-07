@@ -13,7 +13,7 @@ from diffusers import QwenImage21Transformer2DModel
 from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21KVCache
 from safetensors.torch import save_file
 
-src = sys.argv[1] if len(sys.argv) > 1 else "models/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf"
+src = sys.argv[1] if len(sys.argv) > 1 else "models/image/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf"
 dst = sys.argv[2] if len(sys.argv) > 2 else "models/ref/qwen_dit_ref.safetensors"
 
 

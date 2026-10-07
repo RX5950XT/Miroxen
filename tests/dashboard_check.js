@@ -40,9 +40,9 @@ async (page) => {
   check(body.images.length === 2 && body.prompt.includes("Picture 2 is a mask"), "局部修改素材");
   await page.locator("#image-task").selectOption("generate");
   await page.getByText("模型檔與量化版本", { exact: true }).click();
-  await page.locator('#model-files select[data-role="dit"]').selectOption("qwen_image_2.1-Q4_K.gguf");
+  await page.locator('#model-files select[data-role="dit"]').selectOption("qwen-image-2.1-UC-Q8_0.gguf");
   body = await page.evaluate(() => buildRequest());
-  check(body.model_files.dit === "qwen_image_2.1-Q4_K.gguf", "模型檔選擇送出");
+  check(body.model_files.dit === "qwen-image-2.1-UC-Q8_0.gguf", "模型選擇使用 UC 圖片 DiT");
   await page.locator("#mode-video").click();
   await page.locator("#steps").fill("1");
   check(await page.evaluate(async () => { try { await buildRequest(); return false; } catch { return true; } }), "影片至少兩個取樣點");

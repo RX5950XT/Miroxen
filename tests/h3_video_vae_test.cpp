@@ -26,7 +26,7 @@ static void env(const char* name, const std::string& value) {
 
 static fs::path model_root() {
   if (const char* p = std::getenv("MX_MODEL_ROOT")) return p;
-  if (fs::exists("models/minimax-h3")) return "models";
+  if (fs::exists("models/video/minimax-h3")) return "models";
   return "../../Miroxen/models";
 }
 
@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
     }
     MX_CHECK(only.empty() || only == "unsloth" || only == "diffusers", "權重 layout 不合法");
     env("CUDA_DEVICE_ORDER", "PCI_BUS_ID");
-    const fs::path root = model_root(), folder = root / "minimax-h3/hf/vae";
+    const fs::path root = model_root(), folder = root / "video/minimax-h3/hf/vae";
     const fs::path reference = root / "ref/h3_video_vae_ref.safetensors";
     if (!fs::exists(reference) || !fs::exists(folder / "config.json")) {
       std::printf("SKIP: 缺少 reference 或 config.json（%s）\n", root.string().c_str());
@@ -184,7 +184,7 @@ int main(int argc, char** argv) {
       if (!only.empty() && only != layout) continue;
       std::vector<fs::path> files;
       if (std::strcmp(layout, "unsloth") == 0)
-        files.push_back(root / "minimax-h3/vae/minimax_h3_video_vae_fp16.safetensors");
+        files.push_back(root / "video/minimax-h3/vae/minimax_h3_video_vae_fp16.safetensors");
       else
         for (int i = 1; i <= 3; ++i)
           files.push_back(folder / strf("diffusion_pytorch_model-%05d-of-00003.safetensors", i));

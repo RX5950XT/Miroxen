@@ -25,7 +25,7 @@ def synthetic_rgb(height, width):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, default=Path(
-        "D:/Workspace/Personal_Project/Miroxen/models/minimax-h3/hf/vae"))
+        "D:/Workspace/Personal_Project/Miroxen/models/video/minimax-h3/hf/vae"))
     parser.add_argument("--output", type=Path, default=Path(
         "D:/Workspace/Personal_Project/Miroxen/models/ref/h3_video_vae_ref.safetensors"))
     parser.add_argument("--seed", type=int, default=42)

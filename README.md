@@ -49,15 +49,13 @@ build\miroxen.exe serve --host 127.0.0.1 --port 8188
 以下是這台電腦的已安裝檔案；粗體為預設。來源已對照下載紀錄與 Hub 檔案雜湊。
 模型權重不提交 Git，各模型／LoRA 依來源頁面的授權使用。
 
-### 圖片：`models/qwen-image-2.1/`
+### 圖片：`models/image/qwen-image-2.1/`
 
 原始架構與模型：[Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1)。
 
 | 元件 | 檔案 | 來源 |
 |---|---|---|
 | **DiT · Q8_0** | **`qwen-image-2.1-UC-Q8_0.gguf`** | [abenzerps/Qwen-Image-2.1-Uncensored-GGUF](https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF) |
-| 原版 DiT · Q8_0／Q4_K | `qwen_image_2.1-Q8_0.gguf`、`qwen_image_2.1-Q4_K.gguf` | [leejet/Qwen-Image-2.1-GGUF](https://huggingface.co/leejet/Qwen-Image-2.1-GGUF) |
-| 原版 DiT · Q4_K_M | `qwen-image-2.1-Q4_K_M.gguf` | [unsloth/Qwen-Image-2.1-GGUF](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF) |
 | **文字編碼器 · Q4_K_M**／備選 Q8_0 | `Qwen3VL-8B-Instruct-Q4_K_M.gguf`、`Qwen3VL-8B-Instruct-Q8_0.gguf` | [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) |
 | 視覺編碼器 · F16，編輯時載入 | `mmproj-Qwen3VL-8B-Instruct-F16.gguf` | [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) |
 | **紋理修正 VAE · BF16** | **`vae/texture_fix_vae_for_qwen_image_2.1_bf16.safetensors`** | [madebyollin/texture-fix-vae-for-qwen-image-2.1](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1/tree/1f80456b6de9d89043c133ff1f3875449b8bd016) |
@@ -71,15 +69,18 @@ SHA-256：`cde456c72ea3ecebfc1be783300e972711d875e0c5f1bed33d42b66b156affa8`。
 目前紋理修正 VAE 固定在表中的舊 revision，SHA-256 為
 `05e9af8da4697d1a5118b674c3d90e95f932702d2c5a8900d7d4f05076403cc7`，與作者目前最新檔案不同。
 只有解碼器微調，編碼器與原版相同。未安裝它時自動退回官方 VAE。
-舊原版 DiT 保留供回退及既有數值比對測試使用；可從面板選取，或使用 `--qi-dit` 指定。
+圖片 DiT 只保留 UC-Q8_0 作為預設與面板選項；官方文字編碼器、視覺塔與 VAE 仍是必要元件。
+三個原版 DiT 已移至 `out/trash/original-image-dit/`，不再載入；來源為
+[leejet](https://huggingface.co/leejet/Qwen-Image-2.1-GGUF) 與 [unsloth](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF)。
+刪除受到自動安全審查阻擋，檔案仍占空間。原版 DiT 的數值比對測試會明確標示 Skipped，不能用 UC 權重冒充原版比對。
 
 下載新預設：
 
 ```bat
-hf download abenzerps/Qwen-Image-2.1-Uncensored-GGUF qwen-image-2.1-UC-Q8_0.gguf --revision 6b34e59458d3eb7ba6a6f86a116aed5253dc02c3 --local-dir models/qwen-image-2.1
+hf download abenzerps/Qwen-Image-2.1-Uncensored-GGUF qwen-image-2.1-UC-Q8_0.gguf --revision 6b34e59458d3eb7ba6a6f86a116aed5253dc02c3 --local-dir models/image/qwen-image-2.1
 ```
 
-### 影音：`models/minimax-h3/`
+### 影音：`models/video/minimax-h3/`
 
 原始模型：[MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)。
 
@@ -99,7 +100,9 @@ FL2VA 與 Ref2VA 是不同 checkpoint，給參考素材時會自動換用 Ref2VA
 
 ## LoRA 來源與排程
 
-檔案放在 `models/loras/`。畫風 LoRA 不等於加速 LoRA；只加畫風時仍用原版步數。
+圖片 LoRA 放在 `models/loras/image/`，影片 LoRA 放在 `models/loras/video/`。
+API 與 CLI 仍可直接使用原檔名；不必在 API 名稱填子目錄。舊平面 LoRA 目錄也可讀取。
+畫風 LoRA 不等於加速 LoRA；只加畫風時仍用原版步數。
 
 | 模型／用途 | 檔案 | 來源 | Miroxen 設定 |
 |---|---|---|---|
@@ -159,9 +162,15 @@ python tools/perf/pipeline_bench.py --base http://127.0.0.1:8188 --out out/perf/
 | `tests/` | 單元／數值比對／瀏覽器檢查 |
 | `tools/` | 產生數值比對資料的 Python 工具，推論時不需要 |
 | `third_party/` | 既有第三方標頭 |
-| `models/` | 模型、LoRA、tokenizer；`models/ref/` 是測試資料，並非待刪垃圾 |
+| `models/image/`、`models/video/` | 分開存放圖片／影音模型、編碼器、VAE 與 tokenizer |
+| `models/loras/image/`、`models/loras/video/` | 圖片／影音 LoRA；API 遇到同名檔案會拒絕載入，避免選錯 |
+| `models/ref/` | 數值比對資料，保留供測試 |
 | `build/` | CMake／Ninja 產物，保留可執行服務與增量建置 |
-| `out/` | 生成作品；`out/qa/` 集中 QA 截圖、腳本與紀錄；`2026-10-06/unused-venv/` 等為隔離的無用暫存，尚未刪除 |
+| `out/images/`、`out/videos/` | 原本零散的圖片、影片與配套音訊 |
+| `out/generated/` | 目前儀表板新生成的作品，服務輸出目錄可用 `--out` 指定 |
+| `out/qa/`、`out/perf/` | QA 截圖／腳本／紀錄，以及按日期整理的效能量測與作品 |
+| `out/reports/` | 整理紀錄；`organization-20261007.json` 記錄每個舊路徑與新位置，歷史任務紀錄可據此查找 |
+| `out/trash/` | 確認無用的隔離暫存及原版圖片 DiT；安全審查拒絕刪除，尚未釋放容量 |
 | `docs/`、`tasks/` | API／研究文件與進度、已知限制 |
 
 ```bat

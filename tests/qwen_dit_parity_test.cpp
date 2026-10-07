@@ -73,11 +73,11 @@ static int run_case(QwenImageDit& dit, const char* ref) {
 }
 
 int main() {
-  const char* gguf = "models/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf";
+  const char* gguf = "models/image/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf";
   const char* refs[] = {"models/ref/qwen_dit_ref.safetensors", "models/ref/qwen_dit_edit_ref.safetensors"};
   if (!std::filesystem::exists(gguf)) {
-    std::printf("SKIP：缺少 %s\n", gguf);
-    return 0;
+    std::printf("SKIP：原版 Qwen DiT 已移除（%s）；此 parity 參考不適用 UC 模型。\n", gguf);
+    return 77;
   }
   try {
     TensorStore st;

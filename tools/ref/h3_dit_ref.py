@@ -17,7 +17,7 @@ from diffusers.modular_pipelines.minimax_h3.before_denoise import (
     MiniMaxH3PrepareLayoutStep, MiniMaxH3SetTimestepsStep, patchify_video_latents)
 from safetensors.torch import save_file
 
-src = sys.argv[1] if len(sys.argv) > 1 else "models/minimax-h3/minimax_h3_fl2va_pruned-Q4_K.gguf"
+src = sys.argv[1] if len(sys.argv) > 1 else "models/video/minimax-h3/minimax_h3_fl2va_pruned-Q4_K.gguf"
 dst = sys.argv[2] if len(sys.argv) > 2 else "models/ref/h3_dit_ref.safetensors"
 torch.manual_seed(0)
 

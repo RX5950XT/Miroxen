@@ -22,7 +22,7 @@ else:
     rows = torch.from_numpy(np.fromfile(os.path.join(dump, src), dtype=np.float32)).reshape(-1, 96)
 # 反 patchify：rows (f, h/2, w/2) × (c, pt=1, ph, pw) → [1, 24, F, H, W]
 lat = rows.reshape(F, H // 2, W // 2, 24, 1, 2, 2).permute(3, 0, 4, 1, 5, 2, 6).reshape(1, 24, F, H, W)
-vae = AutoencoderKLMiniMaxH3.from_pretrained("models/minimax-h3/hf/vae", torch_dtype=torch.bfloat16).to("cuda")
+vae = AutoencoderKLMiniMaxH3.from_pretrained("models/video/minimax-h3/hf/vae", torch_dtype=torch.bfloat16).to("cuda")
 mean = torch.tensor(vae.config.latents_mean).view(1, -1, 1, 1, 1)
 std = torch.tensor(vae.config.latents_std).view(1, -1, 1, 1, 1)
 with torch.no_grad():

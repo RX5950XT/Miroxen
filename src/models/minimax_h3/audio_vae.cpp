@@ -78,7 +78,7 @@ std::string config_text(const TensorStore& st) {
     MX_CHECK(text.size() <= (1u << 20), "音訊 config metadata 大小無效"); return text;
   }
   const char* path = std::getenv("MX_H3_AUDIO_VAE_CONFIG");
-  std::ifstream f(path ? path : "models/minimax-h3/hf/audio_vae/config.json", std::ios::binary);
+  std::ifstream f(path ? path : "models/video/minimax-h3/hf/audio_vae/config.json", std::ios::binary);
   MX_CHECK(f.good(), "無法讀取音訊 config；請設定 MX_H3_AUDIO_VAE_CONFIG");
   std::ostringstream out; out << f.rdbuf(); text = out.str();
   MX_CHECK(!text.empty() && text.size() <= (1u << 20), "音訊 config 大小無效"); return text;

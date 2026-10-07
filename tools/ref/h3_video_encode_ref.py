@@ -11,7 +11,7 @@ import torch
 from diffusers import AutoencoderKLMiniMaxH3
 from safetensors.torch import save_file
 
-MODEL = "D:/Workspace/Personal_Project/Miroxen/models/minimax-h3/hf/vae"
+MODEL = "D:/Workspace/Personal_Project/Miroxen/models/video/minimax-h3/hf/vae"
 OUT = "D:/Workspace/Personal_Project/Miroxen/models/ref/h3_video_encode_ref.safetensors"
 F, H, W = 22, 256, 448
 

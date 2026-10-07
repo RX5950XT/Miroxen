@@ -8,8 +8,8 @@ from tokenizers import Tokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "tests" / "data" / "tokenizer_vectors.txt"
-QWEN = Path(r"D:\Workspace\Personal_Project\Miroxen\models\qwen-image-2.1\hf\processor\tokenizer.json")
-MINI = Path(r"D:\Workspace\Personal_Project\Miroxen\models\minimax-h3\hf\tokenizer\tokenizer.json")
+QWEN = ROOT / "models" / "image" / "qwen-image-2.1" / "hf" / "processor" / "tokenizer.json"
+MINI = ROOT / "models" / "video" / "minimax-h3" / "hf" / "tokenizer" / "tokenizer.json"
 
 SPECIALS = [
     "<|endoftext|>",

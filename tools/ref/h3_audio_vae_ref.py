@@ -19,14 +19,14 @@ def model_root():
         return Path(os.environ["MX_MODELS_DIR"])
     repo = Path(__file__).resolve().parents[2]
     for root in (repo / "models", repo.parent.parent / "Miroxen" / "models"):
-        if (root / "minimax-h3/hf/audio_vae/config.json").is_file():
+        if (root / "video/minimax-h3/hf/audio_vae/config.json").is_file():
             return root
     return repo / "models"
 
 
 def main():
     root = model_root()
-    src = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "minimax-h3/hf/audio_vae"
+    src = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "video/minimax-h3/hf/audio_vae"
     dst = Path(sys.argv[2]) if len(sys.argv) > 2 else root / "ref/h3_audio_vae_ref.safetensors"
     if not (src / "config.json").is_file() or not (src / "diffusion_pytorch_model.safetensors").is_file():
         print(f"SKIP：缺少音訊模型 {src}")

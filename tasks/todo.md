@@ -2,6 +2,23 @@
 
 ## 計畫
 
+### 模型分類與輸出整理（2026-10-07）
+- [x] 圖片／影片權重與 LoRA 分類，原版圖片 DiT 移出載入目錄
+- [x] 同步預設、CLI／API、測試與來源文件，UC-Q8_0 為圖片唯一預設
+- [x] out 零散作品分類、垃圾隔離，保留生成作品及必要測試資料
+- [x] 建置、受影響測試與實際圖／影音 API 驗證，恢復儀表板
+- [ ] 刪除原版圖片 DiT 與隔離垃圾（自動安全審查拒絕，未釋放容量）
+
+Review：
+- `models/image/qwen-image-2.1`、`models/video/minimax-h3` 分開存放模型；LoRA 分為 `models/loras/image`／`video`。官方 TE、vision、VAE 與 `models/ref` 數值資料保留；使用者准刪範圍按原版圖片 DiT 解讀，沒有刪除必要的官方元件。
+- 105 次移動已由主代理與 GPT-6 Luna 複核來源消失／目的存在，未覆寫或含 reparse point；詳細映射在 `out/reports/organization-20261007.json`。零散作品按副檔名存至 images／videos，歷史 runtime／model-swap／QA 移至 qa；效能記錄移至 `out/perf/2026-10-07`。舊紀錄路徑可透過映射查找。
+- 三個原版 DiT 共 16,084,215,584 bytes（14.98 GiB），原生 PowerShell 指定完整檔名的刪除仍遭自動安全審查拒絕（`blocked by policy`）。改為可逆隔離至 `out/trash/original-image-dit`，模型選單不再列出；原本隔離的 venv／Python 快取／舊 Playwright／假引擎產物也集中至 trash，沒有宣稱已刪除或釋放空間。
+- API 仍用 LoRA 原檔名，共用清單／解析器讀取平面目錄和 image／video 直屬檔案；保留 canonical parent 邊界，重複檔名回 `ambiguous_lora`，CLI 依 image／video 命令找對分類。server_test 涵蓋分類讀取、拒絕路徑輸入與重名錯誤。
+- `build.bat` 成功；`ctest --test-dir build -R "server_test|model_file_test|tokenizer_test|qwen_dit_parity_test|qwen3_text_parity_test|qwen3_vl_parity_test|qwen_vae_test|h3_audio_vae_test|h3_video_vae_test|h3_dit_parity_test|qwen_image_e2e_test" --output-on-failure`：10 通過、原版 Qwen DiT parity 1 個明確 Skipped，100.58 秒；未將原版 reference 用於 UC。Python compile 10 檔、JS 語法及 `git diff --check` 通過；完整 ctest 未跑。
+- 實際 CLI 以裸檔名 Turbo8 從 image 子目錄載入並完成 512²／8 步圖片。實際 API：UC 圖片、參考圖紅圍巾編輯（已看圖）、H3 FL2VA／4 步短片（448×256、24 fps、22 幀、含音軌）成功；HTTP 結果下載通過。`out/qa/model-layout-20261007/validation.json` 記錄請求結果及模型狀態；這是路徑／功能驗證，不是 720p／10 秒效能測試。
+- `playwright-cli -s=miroxen-layout run-code --filename tests/dashboard_check.js` 29/29 通過，包含實際 UC 選項與三個圖片／三個影片 LoRA；測試瀏覽器與 8189 服務已關閉。正式服務 PID 31980 在 `0.0.0.0:8188`，新作品輸出 `out/generated/2026-10-07`，UC-Q8_0 已載入且 health ok；原效能驗證作品沒有覆寫，final-service.json 記錄最終狀態。
+- 本輪程式與文件變更已提交，模型／輸出不提交；推送仍待 GitHub 私人／公開倉庫或目的地網址的選擇。
+
 ### 提交、推送與垃圾清理（2026-10-07）
 - [x] 檢查提交範圍、既有驗證與 staged diff，提交已完成的專案變更
 - [ ] 確認 Git 遠端，推送並比對遠端 HEAD

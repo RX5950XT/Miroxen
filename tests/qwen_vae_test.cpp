@@ -145,8 +145,8 @@ int main(int argc, char** argv) {
     refs.add_file(ref.string(), "\x01");
     const char* names[] = {"Comfy", "diffusers"};
     const std::filesystem::path paths[] = {
-        root / "qwen-image-2.1/vae/qwen_image_2.1_vae_bf16.safetensors",
-        root / "qwen-image-2.1/hf/vae/diffusion_pytorch_model.safetensors"};
+        root / "image/qwen-image-2.1/vae/qwen_image_2.1_vae_bf16.safetensors",
+        root / "image/qwen-image-2.1/hf/vae/diffusion_pytorch_model.safetensors"};
     int passed = 0, failed = 0, skipped = 0;
     bool timed = false;
     for (int i = 0; i < 2; ++i) {

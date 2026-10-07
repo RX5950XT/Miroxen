@@ -16,7 +16,7 @@ namespace {
 fs::path model_root() {
   if(const char* p=std::getenv("MX_MODELS_DIR"))return p;
   for(const auto& p:{fs::path("models"),fs::path("../../Miroxen/models")})
-    if(fs::exists(p/"minimax-h3/hf/audio_vae/config.json"))return fs::absolute(p);
+    if(fs::exists(p/"video/minimax-h3/hf/audio_vae/config.json"))return fs::absolute(p);
   return "models";
 }
 std::vector<float> read(const TensorStore& st,const std::string& n,const std::vector<int64_t>& shape) {
@@ -46,7 +46,7 @@ template<class F> bool rejects(F f) {
 int main() {
   try {
     putenv("CUDA_DEVICE_ORDER","PCI_BUS_ID");auto root=model_root();
-    auto ref=root/"ref/h3_audio_vae_ref.safetensors",cfg=root/"minimax-h3/hf/audio_vae/config.json";
+    auto ref=root/"ref/h3_audio_vae_ref.safetensors",cfg=root/"video/minimax-h3/hf/audio_vae/config.json";
     if(!fs::exists(ref) || !fs::exists(cfg)){std::printf("SKIP：缺少參考或 config：%s\n",root.string().c_str());return 0;}
     if(!std::getenv("MX_H3_AUDIO_VAE_CONFIG"))putenv("MX_H3_AUDIO_VAE_CONFIG",cfg.string());
     TensorStore rs;rs.add_file(ref.string());
@@ -58,8 +58,8 @@ int main() {
     auto short_pcm=read(rs,"short_pcm",{801,2}),short_enc=read(rs,"short_encoded",{2,32,2});
     cudaDeviceProp prop;MX_CUDA(cudaGetDeviceProperties(&prop,0));std::printf("GPU0：%s\n",prop.name);
     int fails=0,passed=0,layouts=0;
-    for(const auto& weight:{root/"minimax-h3/vae/minimax_h3_audio_vae_fp32.safetensors",
-                           root/"minimax-h3/hf/audio_vae/diffusion_pytorch_model.safetensors"}) {
+    for(const auto& weight:{root/"video/minimax-h3/vae/minimax_h3_audio_vae_fp32.safetensors",
+                           root/"video/minimax-h3/hf/audio_vae/diffusion_pytorch_model.safetensors"}) {
       if(!fs::exists(weight)){std::printf("SKIP：%s\n",weight.string().c_str());continue;}
       ++layouts;std::printf("權重：%s\n",weight.string().c_str());
       TensorStore st;st.add_file(weight.string());H3AudioVae vae(st,0);Ctx c(0,1<<20,1<<20);

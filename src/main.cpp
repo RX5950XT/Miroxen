@@ -68,7 +68,7 @@ EngineConfig engine_config(const Args& a) {
   return c;
 }
 
-// --lora 檔案:強度；只給檔名時到 models/loras/ 找。
+// --lora 檔案:強度；只給檔名時到 models/loras/image 或 video 找，仍接受舊平面目錄。
 std::vector<LoraSpec> lora_specs(const Args& a) {
   const auto dir = std::filesystem::path(engine_config(a).models_dir) / "loras";
   std::vector<LoraSpec> out;
@@ -77,7 +77,11 @@ std::vector<LoraSpec> lora_specs(const Args& a) {
     LoraSpec s;
     s.path = c != std::string::npos && c > 1 ? l.substr(0, c) : l;
     s.scale = c != std::string::npos && c > 1 ? float(std::atof(l.substr(c + 1).c_str())) : 1.f;
-    if (!std::filesystem::exists(s.path) && std::filesystem::exists(dir / s.path)) s.path = (dir / s.path).string();
+    if (!std::filesystem::exists(s.path)) {
+      auto classified = dir / (a.cmd == "video" ? "video" : "image") / s.path;
+      if (std::filesystem::exists(classified)) s.path = classified.string();
+      else if (std::filesystem::exists(dir / s.path)) s.path = (dir / s.path).string();
+    }
     out.push_back(s);
   }
   return out;

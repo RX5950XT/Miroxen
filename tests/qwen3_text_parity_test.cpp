@@ -12,9 +12,9 @@
 using namespace mx;
 
 int main() {
-  const char* gguf = "models/qwen-image-2.1/Qwen3VL-8B-Instruct-Q8_0.gguf";
+  const char* gguf = "models/image/qwen-image-2.1/Qwen3VL-8B-Instruct-Q8_0.gguf";
   const char* ref = "models/ref/qwen3_text_ref.safetensors";
-  const char* tokp = "models/qwen-image-2.1/hf/processor/tokenizer.json";
+  const char* tokp = "models/image/qwen-image-2.1/hf/processor/tokenizer.json";
   if (!std::filesystem::exists(gguf) || !std::filesystem::exists(ref)) {
     std::printf("SKIP：缺少 %s 或 %s\n", gguf, ref);
     return 0;

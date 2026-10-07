@@ -204,10 +204,10 @@ void invalid_files(Temp& temp) {
   std::printf("Malformed files: %d rejected; failed add preserves store PASS\n", cases);
 }
 void real_model() {
-  const std::string path = "D:/Workspace/Personal_Project/Miroxen/models/qwen-image-2.1/qwen_image_2.1-Q8_0.gguf";
-  if (!std::filesystem::exists(path)) { std::puts("Real Qwen GGUF absent: SKIP"); return; }
+  const std::string path = "D:/Workspace/Personal_Project/Miroxen/models/image/qwen-image-2.1/qwen-image-2.1-UC-Q8_0.gguf";
+  if (!std::filesystem::exists(path)) { std::puts("UC Qwen GGUF absent: SKIP"); return; }
   TensorStore s; s.add_file(path); const auto names = s.names();
-  MX_CHECK(!names.empty(), "真實模型沒有張量"); std::printf("Real Qwen GGUF: %zu tensors\n", s.size());
+  MX_CHECK(!names.empty(), "UC 模型沒有張量"); std::printf("UC Qwen GGUF: %zu tensors\n", s.size());
   for (size_t i = 0; i < std::min<size_t>(3, names.size()); ++i) {
     const auto& w = s.get(names[i]); std::printf("  %s %s [", w.name.c_str(), gtype_name(w.type));
     for (size_t j = 0; j < w.shape.size(); ++j) std::printf("%s%lld", j ? "," : "", (long long)w.shape[j]);
@@ -218,7 +218,7 @@ void real_model() {
     const auto& w = s.get(name);
     if (w.type == GType::Q8_0 && (!chosen || w.numel() < chosen->numel())) chosen = &w;
   }
-  MX_CHECK(chosen, "真實模型沒有適合測試的 Q8_0 張量"); const auto& w = *chosen;
+  MX_CHECK(chosen, "UC 模型沒有適合測試的 Q8_0 張量"); const auto& w = *chosen;
   MX_CUDA(cudaSetDevice(0)); DevBuf src(w.nbytes, 0), dst(w.numel() * 4, 0);
   MX_CUDA(cudaMemcpy(src.get(), w.data, w.nbytes, cudaMemcpyHostToDevice));
   dequant_to_f32(src.get(), w.type, w.numel(), dst.as<float>(), nullptr);

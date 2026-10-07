@@ -18,9 +18,9 @@ from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
 args = sys.argv[1:] + [None] * 2
-img_path = args[0] or "out/ref_input.png"
+img_path = args[0] or "out/images/ref_input.png"
 dst = args[1] or "models/ref/qwen3_vl_ref.safetensors"
-ROOT = "models/qwen-image-2.1"
+ROOT = "models/image/qwen-image-2.1"
 
 img = Image.open(img_path).convert("RGB")
 w, h = img.size

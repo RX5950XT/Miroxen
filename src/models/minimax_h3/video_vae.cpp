@@ -87,8 +87,8 @@ ConfigValue read_config() {
   std::vector<std::filesystem::path> paths;
   if(env && *env) paths.emplace_back(env);
   else {
-    paths.emplace_back("models/minimax-h3/hf/vae/config.json");
-    paths.emplace_back("../../Miroxen/models/minimax-h3/hf/vae/config.json");
+    paths.emplace_back("models/video/minimax-h3/hf/vae/config.json");
+    paths.emplace_back("../../Miroxen/models/video/minimax-h3/hf/vae/config.json");
   }
   for(const auto& path:paths) {
     if(!std::filesystem::exists(path)) continue;

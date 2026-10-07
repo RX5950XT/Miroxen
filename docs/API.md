@@ -155,7 +155,7 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 
 `web/` 是不需建置步驟的頁面，文字是繁體中文。它呼叫 `/v1/models`、`/v1/system`、`/v1/loras`、`/v1/jobs`，免金鑰時用 EventSource 訂進度。API 分頁可輸入金鑰（只放目前頁面記憶體，不寫儲存）；使用金鑰或 SSE 斷線時以每秒輪詢更新工作。
 
-生成請求可加 `model_files`，例如 `{"dit":"qwen_image_2.1-Q4_K.gguf","vae":"qwen_image_2.1_vae_bf16.safetensors"}`。只接受該模型 `/v1/models` 列出的角色與檔名；其他值回 `invalid_model_files`。換檔與換運算精度都會重新載入，省略角色時回到伺服器預設。
+生成請求可加 `model_files`，例如 `{"dit":"qwen-image-2.1-UC-Q8_0.gguf","vae":"qwen_image_2.1_vae_bf16.safetensors"}`。只接受該模型 `/v1/models` 列出的角色與檔名；其他值回 `invalid_model_files`。換檔與換運算精度都會重新載入，省略角色時回到伺服器預設。
 
 `GET /v1/system` 保留原本 `gpus`、`queue_length`，另提供：
 - `host`：`cpu_percent`、`ram_total`、`ram_used`，整台電腦的用量。
@@ -164,6 +164,7 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 - `api`：`requests`、`errors`（已完成的 `/v1/*` 請求，包含監控輪詢與 4xx／5xx）、`uptime_seconds`、`authentication`。重啟後歸零。CPU 首筆尚無採樣間隔時為 `null`；目前主機用量支援 Windows。
 
 `GET /v1/loras` 每筆新增 `model`、`purpose`、`task`、`preset`。目前已知的加速版本提供精確預設；其他檔案可能無法識別，此時 `model:"unknown"` 並附提示，不承諾相容性。
+LoRA 清單讀取 `models/loras/` 與其 `image/`、`video/` 子目錄；請求仍使用檔名，不接受路徑。不同分類若有同名檔案，回應 `400 ambiguous_lora`，避免載入錯誤的 LoRA。
 工作物件新增 `parameters`，含輸出設定、LoRA、預計對齊後的影片幀數、24 fps 與秒數；不包含 base64 素材。`result.seconds` 仍為生成耗時，和影片播放長度不同。
 
 面板功能重點：

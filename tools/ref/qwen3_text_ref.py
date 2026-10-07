@@ -15,9 +15,9 @@ from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfi
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
 args = sys.argv[1:] + [None] * 5
-src = args[0] or "models/qwen-image-2.1/Qwen3VL-8B-Instruct-Q8_0.gguf"
-tok_path = args[1] or "models/qwen-image-2.1/hf/processor/tokenizer.json"
-cfg_path = args[2] or "models/qwen-image-2.1/hf/text_encoder/config.json"
+src = args[0] or "models/image/qwen-image-2.1/Qwen3VL-8B-Instruct-Q8_0.gguf"
+tok_path = args[1] or "models/image/qwen-image-2.1/hf/processor/tokenizer.json"
+cfg_path = args[2] or "models/image/qwen-image-2.1/hf/text_encoder/config.json"
 dst = args[3] or "models/ref/qwen3_text_ref.safetensors"
 
 SYS = "Comprehend and analyze the provided prompt."

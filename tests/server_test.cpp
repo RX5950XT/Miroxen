@@ -120,6 +120,8 @@ struct TempTree {
     fs::create_directories(root / "lora" / "nested");
     fs::create_directories(root / "out");
     touch(root / "lora" / "good.safetensors", "not-a-real-header");
+    touch(root / "lora" / "image" / "image.safetensors", "not-a-real-header");
+    touch(root / "lora" / "video" / "video.safetensors", "not-a-real-header");
     touch(root / "lora" / "skip.txt", "nope");
     touch(root / "lora" / "nested" / "hidden.safetensors", "nope");
   }
@@ -182,7 +184,7 @@ void test_meta_and_static(httplib::Client& cli) {
   for (auto& g : sys["gpus"]) check(g.contains("utilization_percent") && g.contains("temperature_c") && g.contains("power_w"), "GPU 監控欄位");
 
   auto loras = parse_body(cli.Get("/v1/loras"));
-  check(loras["data"].size() == 1, "只該列出一筆 LoRA");
+  check(loras["data"].size() == 3, "應列出平面目錄、image 與 video 的 LoRA，略過其他子目錄");
   check(loras["data"][0].value("name", "") == "good.safetensors", "LoRA 名稱");
   check(loras["data"][0].value("size", 0) > 0, "LoRA 大小");
   check(loras["data"][0].value("model", "") == "unknown" && loras["data"][0].contains("warning"), "未知 LoRA 不能假裝相容");
@@ -306,6 +308,11 @@ void test_validation(httplib::Client& cli) {
   expect_code(post_json(cli, "/v1/images/generations", bad_lora), 400, "invalid_lora");
   bad_lora["loras"] = json::array({{{"name", "missing.safetensors"}}});
   expect_code(post_json(cli, "/v1/images/generations", bad_lora), 400, "lora_not_found");
+  for (const char* name : {"image.safetensors", "video.safetensors"}) {
+    bad_lora["loras"] = json::array({{{"name", name}}});
+    auto accepted = post_json(cli, "/v1/images/generations", bad_lora);
+    check(accepted && accepted->status == 200, "分類 LoRA 可用檔名呼叫");
+  }
   expect_code(post_json(cli, "/v1/images/generations", {{"model", "qwen-image-2.1"},
                                                         {"prompt", "x"},
                                                         {"size", "256x256"},
@@ -457,6 +464,11 @@ void run_all() {
   test_meta_and_static(*main_server.cli);
   test_model_control(*main_server.cli);
   test_validation(*main_server.cli);
+  touch(tree.root / "lora" / "image" / "duplicate.safetensors", "nope");
+  touch(tree.root / "lora" / "video" / "duplicate.safetensors", "nope");
+  expect_code(main_server.cli->Get("/v1/loras"), 400, "ambiguous_lora");
+  fs::remove(tree.root / "lora" / "image" / "duplicate.safetensors");
+  fs::remove(tree.root / "lora" / "video" / "duplicate.safetensors");
   test_image_and_jobs(*main_server.cli);
   test_auth_and_limit(tree);
 }

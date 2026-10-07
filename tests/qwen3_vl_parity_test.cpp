@@ -34,8 +34,8 @@ static double rel_err(const std::vector<float>& a, const std::vector<float>& b) 
 }
 
 int main() {
-  const char* mmproj = "models/qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf";
-  const char* te = "models/qwen-image-2.1/Qwen3VL-8B-Instruct-Q8_0.gguf";
+  const char* mmproj = "models/image/qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf";
+  const char* te = "models/image/qwen-image-2.1/Qwen3VL-8B-Instruct-Q8_0.gguf";
   const char* ref = "models/ref/qwen3_vl_ref.safetensors";
   for (const char* p : {mmproj, te, ref})
     if (!std::filesystem::exists(p)) {

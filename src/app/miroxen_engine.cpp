@@ -26,9 +26,9 @@ std::string first_existing(const std::string& dir, std::initializer_list<const c
 }
 
 void fill_defaults(EngineConfig& c) {
-  std::string qd = (fs::path(c.models_dir) / "qwen-image-2.1").string();
+  std::string qd = (fs::path(c.models_dir) / "image/qwen-image-2.1").string();
   if (c.qi_dit.empty())
-    c.qi_dit = first_existing(qd, {"qwen-image-2.1-UC-Q8_0.gguf", "qwen_image_2.1-Q8_0.gguf", "qwen-image-2.1-Q8_0.gguf", "qwen_image_2.1-Q4_K.gguf"});
+    c.qi_dit = first_existing(qd, {"qwen-image-2.1-UC-Q8_0.gguf"});
   if (c.qi_te.empty())
     c.qi_te = first_existing(qd, {"Qwen3VL-8B-Instruct-Q4_K_M.gguf", "Qwen3VL-8B-Instruct-Q8_0.gguf"});
   if (c.qi_vae.empty())  // 紋理修正版只改解碼器（編碼器相同），有就優先用
@@ -36,7 +36,7 @@ void fill_defaults(EngineConfig& c) {
                                    "vae/qwen_image_2.1_vae_bf16.safetensors"});
   if (c.qi_tok.empty()) c.qi_tok = first_existing(qd, {"hf/processor/tokenizer.json"});
   if (c.qi_mmproj.empty()) c.qi_mmproj = first_existing(qd, {"mmproj-Qwen3VL-8B-Instruct-F16.gguf"});
-  std::string hd = (fs::path(c.models_dir) / "minimax-h3").string();
+  std::string hd = (fs::path(c.models_dir) / "video/minimax-h3").string();
   if (c.h3_dit.empty())
     c.h3_dit = first_existing(hd, {"minimax_h3_fl2va_pruned-Q4_K.gguf", "minimax_h3_fl2va_pruned-Q8_0.gguf",
                                    "minimax_h3_fl2va_pruned-Q6_K.gguf"});

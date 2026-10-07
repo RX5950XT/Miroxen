@@ -53,18 +53,35 @@ bool lora_name_ok(const std::string& name) {
   return ends_with_ci(name, ".safetensors");
 }
 
+std::map<std::string, std::filesystem::path> lora_files(const ServerOptions& opt) {
+  namespace fs = std::filesystem;
+  std::map<std::string, fs::path> files;
+  std::error_code ec;
+  auto base = fs::weakly_canonical(utf8_path(opt.lora_dir), ec);
+  if (ec || !fs::is_directory(base)) return files;
+  for (const auto& dir : {base, base / "image", base / "video"}) {
+    auto folder = fs::weakly_canonical(dir, ec);
+    if (ec || (folder != base && folder.parent_path() != base) || !fs::is_directory(folder)) continue;
+    for (const auto& ent : fs::directory_iterator(folder)) {
+      auto name = path_utf8(ent.path().filename());
+      if (!ent.is_regular_file() || !lora_name_ok(name)) continue;
+      auto full = fs::weakly_canonical(ent.path(), ec);
+      if (ec || full.parent_path() != folder) continue;
+      if (!files.emplace(name, full).second)
+        throw ApiError(400, "invalid_request_error", "ambiguous_lora", "LoRA 檔名重複，請重新命名");
+    }
+  }
+  return files;
+}
+
 std::string resolve_lora(const ServerOptions& opt, const std::string& name) {
   if (!lora_name_ok(name))
     throw ApiError(400, "invalid_request_error", "invalid_lora", "LoRA 名稱不合法");
-  std::error_code ec;
-  auto base = std::filesystem::weakly_canonical(utf8_path(opt.lora_dir), ec);
-  if (ec) throw ApiError(400, "invalid_request_error", "lora_not_found", "找不到 LoRA 目錄");
-  auto full = std::filesystem::weakly_canonical(base / utf8_path(name), ec);
-  if (ec || full.parent_path() != base)
-    throw ApiError(400, "invalid_request_error", "invalid_lora", "LoRA 路徑超出目錄");
-  if (!std::filesystem::is_regular_file(full))
+  auto files = lora_files(opt);
+  auto it = files.find(name);
+  if (it == files.end())
     throw ApiError(400, "invalid_request_error", "lora_not_found", "找不到 LoRA");
-  return full.string();
+  return it->second.string();
 }
 
 std::string require_text(const json& j, const char* key, size_t max_chars, bool allow_empty) {
@@ -514,16 +531,11 @@ std::string models_json(const std::vector<ModelInfo>& models) {
 
 std::string loras_json(const ServerOptions& opt) {
   json data = json::array();
-  std::error_code ec;
-  auto dir = utf8_path(opt.lora_dir);
-  if (std::filesystem::is_directory(dir, ec)) {
+  {
     std::vector<json> rows;
-    for (const auto& ent : std::filesystem::directory_iterator(dir, ec)) {
-      if (!ent.is_regular_file()) continue;
-      auto name = path_utf8(ent.path().filename());
-      if (!lora_name_ok(name)) continue;
+    for (const auto& [name, path] : lora_files(opt)) {
       std::error_code fec;
-      auto sz = ent.file_size(fec);
+      auto sz = std::filesystem::file_size(path, fec);
       if (fec) continue;
       json row = {{"name", name}, {"size", sz}, {"model", "unknown"}, {"purpose", "unknown"}, {"preset", nullptr}};
       std::string lower = name;
@@ -542,7 +554,7 @@ std::string loras_json(const ServerOptions& opt) {
       if (row["model"] == "unknown") {
         try {
           TensorStore store;
-          store.add_file(path_utf8(ent.path()));
+          store.add_file(path_utf8(path));
           for (const auto& key : store.names()) {
             if (key.find("transformer_blocks.") != std::string::npos) { row["model"] = "qwen-image-2.1"; break; }
             if (key.starts_with("blocks.") || key.find("token_refiner.") != std::string::npos) { row["model"] = "minimax-h3"; break; }

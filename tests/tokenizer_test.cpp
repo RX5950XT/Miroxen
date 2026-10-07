@@ -242,8 +242,8 @@ bool file_ok(const char* path) {
 }
 
 const char* kQwen =
-    "D:\\Workspace\\Personal_Project\\Miroxen\\models\\qwen-image-2.1\\hf\\processor\\tokenizer.json";
-const char* kMini = "D:\\Workspace\\Personal_Project\\Miroxen\\models\\minimax-h3\\hf\\tokenizer\\tokenizer.json";
+    "D:\\Workspace\\Personal_Project\\Miroxen\\models\\image\\qwen-image-2.1\\hf\\processor\\tokenizer.json";
+const char* kMini = "D:\\Workspace\\Personal_Project\\Miroxen\\models\\video\\minimax-h3\\hf\\tokenizer\\tokenizer.json";
 const char* kVec = "tests/data/tokenizer_vectors.txt";
 
 }  // namespace

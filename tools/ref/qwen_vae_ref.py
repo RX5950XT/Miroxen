@@ -32,7 +32,7 @@ def main():
     parser.add_argument("--model", type=Path, help="diffusers 格式的 vae 目錄")
     parser.add_argument("--output", type=Path, help="輸出的 safetensors 檔")
     args = parser.parse_args()
-    model_path = args.model or args.root / "models/qwen-image-2.1/hf/vae"
+    model_path = args.model or args.root / "models/image/qwen-image-2.1/hf/vae"
     output = args.output or args.root / "models/ref/qwen_vae_ref.safetensors"
     config = json.loads((model_path / "config.json").read_text(encoding="utf-8"))
     expected = {"in_channels": 4, "out_channels": 4, "z_dim": 64, "scale_factor_spatial": 16}

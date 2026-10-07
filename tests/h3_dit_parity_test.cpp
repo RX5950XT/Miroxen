@@ -24,7 +24,7 @@ static double rel(const std::vector<float>& a, const std::vector<float>& b) {
 }
 
 int main() {
-  const char* gguf = "models/minimax-h3/minimax_h3_fl2va_pruned-Q4_K.gguf";
+  const char* gguf = "models/video/minimax-h3/minimax_h3_fl2va_pruned-Q4_K.gguf";
   const char* ref = std::getenv("MX_H3_REF") ? std::getenv("MX_H3_REF") : "models/ref/h3_dit_ref.safetensors";
   if (!std::filesystem::exists(gguf) || !std::filesystem::exists(ref)) {
     std::printf("SKIP：缺少 %s 或 %s\n", gguf, ref);
