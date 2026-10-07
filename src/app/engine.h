@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,7 @@ struct ImageRequest {
   std::string compute;          // DiT 運算精度 "bf16"/"fp8"/"fp4"；空 = 引擎預設
   bool shift_terminal = true;   // 排程尾端拉伸到 0.02（官方預設）；步數蒸餾 LoRA（如 Turbo8）要關掉
   std::vector<float> sigmas;    // 選填：自訂未位移的 sigma 節點（遞減、首項 1），步數 = 節點數
+  std::map<std::string, std::string> model_files;  // 已安裝的模型檔 ID，由 /v1/models 提供
 };
 
 // MiniMax-H3 Ref2VA 參考（依提示詞裡 <Picture i>／<Video k>／<Audio j> 的順序）。
@@ -47,6 +49,7 @@ struct VideoRequest {
   bool ref_native_canvas = false;    // 參考影片畫布：false = 不超過輸出畫布（快，同 LightX2V match）；true = 官方 768p
   std::vector<LoraSpec> loras;
   std::string compute;          // 同 ImageRequest::compute
+  std::map<std::string, std::string> model_files;
 };
 
 struct Progress {
@@ -60,12 +63,14 @@ struct ImageResult {
   int width = 0, height = 0;
   int64_t seed = 0;
   double seconds = 0;
+  std::map<std::string, double> timings;  // 各階段牆鐘秒數，不含首次模型載入
 };
 
 struct VideoResult {
   std::string mp4_path;  // 輸出檔（含音軌）
   int64_t seed = 0;
   double seconds = 0;
+  std::map<std::string, double> timings;  // 各階段牆鐘秒數，不含首次模型載入
 };
 
 struct ModelInfo {
@@ -73,12 +78,16 @@ struct ModelInfo {
   std::string kind;    // "image" / "video"
   bool loaded = false;
   std::string detail;  // 量化型別、裝置配置等
+  std::map<std::string, std::vector<std::string>> files;
+  std::map<std::string, std::string> defaults, active_files;
+  std::string compute;
 };
 
 struct GpuInfo {
   int index = 0;
   std::string name;
   size_t total = 0, free = 0;
+  std::string pci_bus;
 };
 
 class Engine {
@@ -86,6 +95,8 @@ class Engine {
   virtual ~Engine() = default;
   virtual std::vector<ModelInfo> models() = 0;
   virtual std::vector<GpuInfo> gpus() = 0;
+  virtual void load_model(const std::string& id, const std::map<std::string, std::string>& files, const std::string& compute) = 0;
+  virtual void unload_models() = 0;
   // cancel 由呼叫端設成 true 時，引擎在下一步之間中止並丟出例外。
   virtual ImageResult generate_image(const ImageRequest& r, const ProgressFn& cb,
                                      const std::atomic<bool>* cancel) = 0;

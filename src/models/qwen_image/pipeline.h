@@ -53,6 +53,7 @@ class QwenImagePipeline {
   std::unique_ptr<Qwen3TextEncoder> te_;
   std::unique_ptr<QwenImageDit> dit_;
   std::unique_ptr<QwenImageVae> vae_;
+  DevBuf latent_stats_;  // VAE 裝置上依序放 64 個 mean 與 std
   TensorStore vis_st_;
   std::unique_ptr<Qwen3VisionEncoder> vis_;
   std::unique_ptr<Ctx> vis_ctx_;

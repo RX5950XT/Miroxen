@@ -10,6 +10,7 @@
 #include "server/image_io.h"
 #include "server/media_io.h"
 #include "kernels/ops.h"
+#include "core/timing.h"
 
 namespace mx {
 namespace fs = std::filesystem;
@@ -64,8 +65,9 @@ H3Pipeline::H3Pipeline(const H3Paths& p, H3Devices d) : paths_(p), dev_(d) {
 H3Pipeline::~H3Pipeline() = default;
 
 std::string H3Pipeline::describe() const {
-  return strf("DiT %s/%s @GPU%d（串流）· TE %d 層 @GPU%d（串流）",
-              gtype_name(dit_st_.get("blocks.0.attn.qkv_proj.weight").type), qmode_name(dit_->compute()), dev_.dit,
+  return strf("%s · DiT %s/%s @GPU%d（串流）· TE %d 層 @GPU%d（串流）",
+              ref_active_ ? "Ref2VA" : "FL2VA",
+              gtype_name((ref_active_ ? dit_ref_st_ : dit_st_).get("blocks.0.attn.qkv_proj.weight").type), qmode_name(dit_->compute()), dev_.dit,
               te_->layers(), dev_.text);
 }
 
@@ -241,7 +243,9 @@ H3Pipeline::Prepared H3Pipeline::prepare_fl2va(const VideoRequest& r, const Repo
   std::vector<Piece> pieces;
   for (size_t i = 0; i < feats.size(); i++) pieces.push_back({strf("<Picture %zu>: ", i + 1), &feats[i]});
   std::vector<H3Tag> tags;
+  const auto text_start = std::chrono::steady_clock::now();
   p.txt = encode_prompt(pieces, r.prompt, tags);
+  p.text_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - text_start).count();
   p.L = h3_build_layout(int64_t(tags.size()), F_lat, H, W, A, anchors, tags);
 
   // 條件幀：VAE 編碼（分佈平均、正規化）＋雜訊增強；雜訊先於影片／音訊雜訊抽取（官方順序）。
@@ -391,7 +395,9 @@ H3Pipeline::Prepared H3Pipeline::prepare_ref2va(const VideoRequest& r, const Rep
     }
   }
   std::vector<H3Tag> tags;
+  const auto text_start = std::chrono::steady_clock::now();
   p.txt = encode_prompt(pieces, r.prompt, tags);
+  p.text_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - text_start).count();
   MX_INFO("Ref2VA 文字編碼：%zu token，累計 %.1f 秒", tags.size(), since());
   std::vector<H3RefGeom> geoms;
   for (auto& ref : refs) geoms.push_back(ref.geom);
@@ -415,6 +421,7 @@ H3Pipeline::Prepared H3Pipeline::prepare_ref2va(const VideoRequest& r, const Rep
 
 VideoResult H3Pipeline::generate(const VideoRequest& r, const ProgressFn& cb, const std::atomic<bool>* cancel) {
   auto t0 = std::chrono::steady_clock::now();
+  PhaseTimer timer;
   Report report = [&](const char* st, int i, int n) {
     if (cb) cb(Progress{st, i, n});
     if (cancel && cancel->load()) throw std::runtime_error("已取消");
@@ -423,17 +430,23 @@ VideoResult H3Pipeline::generate(const VideoRequest& r, const ProgressFn& cb, co
   if (ref != ref_active_) report("load", 0, 1);
   ensure_dit(ref);
   apply_loras(r.loras);
+  timer.mark("model_lora");
   Prepared p = ref ? prepare_ref2va(r, report) : prepare_fl2va(r, report);
   MX_INFO("H3 輸入準備（媒體／視覺塔／VAE 編碼／文字編碼）：%.1f 秒，序列 %lld 列（文字 %lld）",
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), (long long)p.L.seq.S,
           (long long)p.L.T);
+  timer.mark("input_encode");
+  timer.seconds["text_encode"] = p.text_seconds;
+  timer.seconds["input_encode"] -= p.text_seconds;
   VideoResult res = sample_and_decode(r, p, report);
+  res.timings.insert(timer.seconds.begin(), timer.seconds.end());
   res.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   report("done", 1, 1);
   return res;
 }
 
 VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, const Report& report) {
+  PhaseTimer timer;
   H3Layout& L = p.L;
   H3Seq& seq = L.seq;
   const int64_t T = L.T, F_lat = L.F_lat, H = L.H, W = L.W, A = L.A;
@@ -481,6 +494,8 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
                             (long long)T, (long long)F_lat, (long long)H, (long long)W, (long long)A, r.steps);
     write_file((fs::path(dump) / "meta.json").string(), reinterpret_cast<const uint8_t*>(meta.data()), meta.size());
   }
+  c.sync();
+  timer.mark("dit_prepare");
   for (int i = 0; i < n; i++) {
     report("denoise", i, n);
     float tv = 1.f - sv[i], ta = 1.f - sa[i];
@@ -500,6 +515,8 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
     axpy_f32(dv.as<float>() + Nr * Cv, vv.as<float>(), sv[i] - sv[i + 1], Nv * Cv, c.stream);
     axpy_f32(da.as<float>() + Nar * Ca, va.as<float>(), sa[i] - sa[i + 1], Na * Ca, c.stream);
   }
+  c.sync();
+  timer.mark("denoise");
   MX_CUDA(cudaMemcpy(vrows.data(), dv.get(), vrows.size() * 4, cudaMemcpyDeviceToHost));
   MX_CUDA(cudaMemcpy(arows.data(), da.get(), arows.size() * 4, cudaMemcpyDeviceToHost));
   MX_INFO("H3 DiT 取樣：%d 次前向 %.1f 秒", n, std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count());
@@ -508,6 +525,7 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
     dump_dev("audio_final.bin", da.get(), da.size());
   }
 
+  timer.mark("latent_readback");
   // 音訊解碼 → WAV。rows：聲道優先 [2A, 32] → [2, 32, A]。
   report("decode_audio", 0, 1);
   const auto ta0 = std::chrono::steady_clock::now();
@@ -527,6 +545,7 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
     avae_->decode(ac, dz.as<float>(), A, pcm);
     write_wav(stem + ".wav", pcm, H3AudioVae::kSampleRate);
   }
+  timer.mark("audio_decode_wav");
   const auto td = std::chrono::steady_clock::now();
   MX_INFO("H3 音訊解碼：%.1f 秒", std::chrono::duration<double>(td - ta0).count());
 
@@ -552,6 +571,8 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   FILE* ff = popen(cmd.c_str(), "w");
 #endif
   MX_CHECK(ff, "無法啟動 ffmpeg（請確認已安裝並在 PATH 中）");
+  timer.mark("video_prepare");
+  double pipe_seconds = 0;
   int written = 0;
   try {
     Ctx vc(dev_.video_vae, vvae_->decode_act_bytes(H, W), 0);
@@ -559,7 +580,9 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
     MX_CUDA(cudaMemcpy(dz.get(), z.data(), z.size() * 4, cudaMemcpyHostToDevice));
     vvae_->decode(vc, dz.as<float>(), F_lat, H, W, [&](const uint8_t* rgb, int nf) {
       size_t bytes = size_t(nf) * (W * 16) * (H * 16) * 3;
+      const auto pipe_start = std::chrono::steady_clock::now();
       MX_CHECK(std::fwrite(rgb, 1, bytes, ff) == bytes, "寫入 ffmpeg 失敗");
+      pipe_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - pipe_start).count();
       written += nf;
       report("decode_video", std::min(written, p.frames), p.frames);
     });
@@ -571,6 +594,9 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
 #endif
     throw;
   }
+  timer.mark("video_vae_decode");
+  timer.seconds["video_vae_decode"] -= pipe_seconds;
+  timer.seconds["ffmpeg_pipe"] = pipe_seconds;
 #ifdef _WIN32
   int rc = _pclose(ff);
 #else
@@ -579,7 +605,9 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   MX_CHECK(rc == 0, "ffmpeg 結束代碼 %d", rc);
   MX_INFO("H3 影片解碼＋編碼 MP4：%.1f 秒",
           std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count());
+  timer.mark("ffmpeg_finish");
   VideoResult res;
+  res.timings = std::move(timer.seconds);
   res.mp4_path = mp4;
   res.seed = p.seed;
   return res;

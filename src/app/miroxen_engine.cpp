@@ -1,6 +1,7 @@
 #include "app/miroxen_engine.h"
 
 #include <cstdlib>
+#include <algorithm>
 #include <filesystem>
 #include <mutex>
 
@@ -27,7 +28,7 @@ std::string first_existing(const std::string& dir, std::initializer_list<const c
 void fill_defaults(EngineConfig& c) {
   std::string qd = (fs::path(c.models_dir) / "qwen-image-2.1").string();
   if (c.qi_dit.empty())
-    c.qi_dit = first_existing(qd, {"qwen_image_2.1-Q8_0.gguf", "qwen-image-2.1-Q8_0.gguf", "qwen_image_2.1-Q4_K.gguf"});
+    c.qi_dit = first_existing(qd, {"qwen-image-2.1-UC-Q8_0.gguf", "qwen_image_2.1-Q8_0.gguf", "qwen-image-2.1-Q8_0.gguf", "qwen_image_2.1-Q4_K.gguf"});
   if (c.qi_te.empty())
     c.qi_te = first_existing(qd, {"Qwen3VL-8B-Instruct-Q4_K_M.gguf", "Qwen3VL-8B-Instruct-Q8_0.gguf"});
   if (c.qi_vae.empty())  // 紋理修正版只改解碼器（編碼器相同），有就優先用
@@ -50,12 +51,17 @@ void fill_defaults(EngineConfig& c) {
 
 class MiroxenEngine : public Engine {
  public:
-  explicit MiroxenEngine(EngineConfig c) : cfg_(std::move(c)) { fill_defaults(cfg_); }
+  explicit MiroxenEngine(EngineConfig c) : cfg_(std::move(c)) {
+    fill_defaults(cfg_);
+    qi_info_ = inventory("qwen-image-2.1", "image", {{"dit", cfg_.qi_dit}, {"text_encoder", cfg_.qi_te},
+                          {"vae", cfg_.qi_vae}, {"vision", cfg_.qi_mmproj}});
+    h3_info_ = inventory("minimax-h3", "video", {{"dit", cfg_.h3_dit}, {"dit_ref", cfg_.h3_dit_ref},
+                          {"text_encoder", cfg_.h3_te}, {"video_vae", cfg_.h3_vvae}, {"audio_vae", cfg_.h3_avae}});
+  }
 
   std::vector<ModelInfo> models() override {
-    std::lock_guard<std::mutex> lk(m_);
-    return {{"qwen-image-2.1", "image", qi_ != nullptr, qi_ ? qi_->describe() : cfg_.qi_dit},
-            {"minimax-h3", "video", h3_ != nullptr, h3_ ? h3_->describe() : cfg_.h3_dit}};
+    std::lock_guard lk(meta_mu_);  // 不等待生成鎖，取樣中也能查 API 狀態
+    return {qi_info_, h3_info_};
   }
 
   std::vector<GpuInfo> gpus() override {
@@ -69,6 +75,9 @@ class MiroxenEngine : public Engine {
       GpuInfo g;
       g.index = i;
       g.name = p.name;
+      char bus[32]{};
+      MX_CUDA(cudaDeviceGetPCIBusId(bus, sizeof(bus), i));
+      g.pci_bus = bus;
       MX_CUDA(cudaMemGetInfo(&g.free, &g.total));
       v.push_back(g);
     }
@@ -78,37 +87,124 @@ class MiroxenEngine : public Engine {
   ImageResult generate_image(const ImageRequest& r, const ProgressFn& cb,
                              const std::atomic<bool>* cancel) override {
     std::lock_guard<std::mutex> lk(m_);
-    const QMode want = parse_qmode(r.compute.empty() ? cfg_.compute : r.compute);
-    if (qi_ && qi_compute_ != want) qi_.reset();  // 換運算精度要重新載入（權重格式不同）
-    if (!qi_) {
-      h3_.reset();  // 兩個模型不同時常駐，釋放 VRAM 與鎖頁記憶體
-      if (cb) cb(Progress{"load", 0, 1});
-      QwenImageDevices d;
-      d.text = cfg_.qi_text_device;
-      d.compute = qi_compute_ = want;
-      qi_ = std::make_unique<QwenImagePipeline>(QwenImagePaths{cfg_.qi_dit, cfg_.qi_te, cfg_.qi_vae, cfg_.qi_tok, cfg_.qi_mmproj}, d);
-    }
+    ensure_image(r.model_files, r.compute, cb);
     return qi_->generate(r, cb, cancel);
   }
 
   VideoResult generate_video(const VideoRequest& r, const ProgressFn& cb,
                              const std::atomic<bool>* cancel) override {
     std::lock_guard<std::mutex> lk(m_);
-    const QMode want = parse_qmode(r.compute.empty() ? cfg_.compute : r.compute);
-    if (h3_ && h3_compute_ != want) h3_.reset();
-    if (!h3_) {
-      qi_.reset();
-      if (cb) cb(Progress{"load", 0, 1});
-      H3Paths p{cfg_.h3_dit, cfg_.h3_te, cfg_.h3_vvae, cfg_.h3_avae, cfg_.h3_tok, cfg_.h3_dit_ref, cfg_.out_dir};
-      H3Devices d;
-      d.compute = h3_compute_ = want;
-      h3_ = std::make_unique<H3Pipeline>(p, d);
-    }
-    return h3_->generate(r, cb, cancel);
+    ensure_video(r.model_files, r.compute, cb);
+    return h3_->generate(r, [&](const Progress& p) {
+      if (p.stage == "encode") publish(true);  // 管線可能切換 FL2VA／Ref2VA，同步實際 DiT 資訊。
+      if (cb) cb(p);
+    }, cancel);
+  }
+
+  void load_model(const std::string& id, const std::map<std::string, std::string>& files, const std::string& compute) override {
+    std::lock_guard lk(m_);
+    if (id == "qwen-image-2.1") ensure_image(files, compute, {});
+    else if (id == "minimax-h3") ensure_video(files, compute, {});
+    else MX_CHECK(false, "找不到模型");
+  }
+  void unload_models() override {
+    std::lock_guard lk(m_);
+    qi_.reset(); h3_.reset(); publish(false);
   }
 
  private:
+  void ensure_image(const std::map<std::string, std::string>& selected, const std::string& compute, const ProgressFn& cb) {
+    auto files = select_files(qi_info_, selected);
+    const QMode want = parse_qmode(compute.empty() ? cfg_.compute : compute);
+    if (qi_ && (qi_compute_ != want || files != qi_active_)) { qi_.reset(); publish(false); }
+    if (!qi_) {
+      h3_.reset();  // 兩個模型不同時常駐，釋放 VRAM 與鎖頁記憶體
+      publish(false);
+      if (cb) cb(Progress{"load", 0, 1});
+      QwenImageDevices d;
+      d.text = cfg_.qi_text_device;
+      d.compute = qi_compute_ = want;
+      qi_ = std::make_unique<QwenImagePipeline>(QwenImagePaths{files["dit"], files["text_encoder"], files["vae"], cfg_.qi_tok, files["vision"]}, d);
+      qi_active_ = files;
+      publish(true);
+    }
+  }
+  void ensure_video(const std::map<std::string, std::string>& selected, const std::string& compute, const ProgressFn& cb) {
+    auto files = select_files(h3_info_, selected);
+    const QMode want = parse_qmode(compute.empty() ? cfg_.compute : compute);
+    if (h3_ && (h3_compute_ != want || files != h3_active_)) { h3_.reset(); publish(false); }
+    if (!h3_) {
+      qi_.reset();
+      publish(false);
+      if (cb) cb(Progress{"load", 0, 1});
+      H3Paths p{files["dit"], files["text_encoder"], files["video_vae"], files["audio_vae"], cfg_.h3_tok, files["dit_ref"], cfg_.out_dir};
+      H3Devices d;
+      d.compute = h3_compute_ = want;
+      h3_ = std::make_unique<H3Pipeline>(p, d);
+      h3_active_ = files;
+      publish(true);
+    }
+  }
+
+  ModelInfo inventory(const std::string& id, const std::string& kind,
+                      const std::map<std::string, std::string>& defaults) {
+    ModelInfo info{id, kind, false, "尚未載入"};
+    info.compute = cfg_.compute;
+    for (const auto& [role, path] : defaults) {
+      const fs::path base(path);
+      info.defaults[role] = base.filename().string();
+      auto& list = info.files[role];
+      list.push_back(base.filename().string());
+      paths_[id + "/" + role] = base.parent_path().string();
+      defaults_[id + "/" + role] = path;
+      if (!fs::is_directory(base.parent_path())) continue;
+      for (const auto& ent : fs::directory_iterator(base.parent_path())) {
+        if (!ent.is_regular_file() || ent.path() == base) continue;
+        auto name = ent.path().filename().string();
+        bool match = ent.path().extension() == base.extension();
+        if (role == "dit") match &= kind == "image" ? (name.starts_with("qwen_image_2.1-") || name.starts_with("qwen-image-2.1-")) : name.starts_with("minimax_h3_fl2va_");
+        if (role == "dit_ref") match &= name.starts_with("minimax_h3_ref2va_");
+        if (role == "text_encoder") match &= kind == "image" ? name.starts_with("Qwen3VL-8B-Instruct-") : name.starts_with("qwen3vl_32b_minimax_h3-");
+        if (role == "vision") match &= name.starts_with("mmproj-Qwen3VL-8B-Instruct-");
+        if (role == "video_vae") match &= name.starts_with("minimax_h3_video_vae_");
+        if (role == "audio_vae") match &= name.starts_with("minimax_h3_audio_vae_");
+        if (match) list.push_back(name);
+      }
+      std::sort(list.begin(), list.end());
+    }
+    return info;
+  }
+
+  std::map<std::string, std::string> select_files(const ModelInfo& info,
+                           const std::map<std::string, std::string>& selected) {
+    std::map<std::string, std::string> result;
+    for (const auto& [role, choices] : info.files) {
+      auto it = selected.find(role);
+      if (it == selected.end()) { result[role] = defaults_.at(info.id + "/" + role); continue; }
+      MX_CHECK(std::find(choices.begin(), choices.end(), it->second) != choices.end(), "模型檔不在已安裝清單");
+      auto base = fs::weakly_canonical(paths_.at(info.id + "/" + role));
+      auto path = fs::weakly_canonical(base / it->second);
+      MX_CHECK(path.parent_path() == base && fs::is_regular_file(path), "模型檔不存在或路徑無效");
+      result[role] = path.string();
+    }
+    return result;
+  }
+
+  void publish(bool ready) {
+    std::lock_guard lk(meta_mu_);
+    qi_info_.loaded = ready && qi_ != nullptr;
+    h3_info_.loaded = ready && h3_ != nullptr;
+    qi_info_.detail = qi_info_.loaded ? qi_->describe() : "尚未載入";
+    h3_info_.detail = h3_info_.loaded ? h3_->describe() : "尚未載入";
+    qi_info_.compute = cfg_.compute;
+    qi_info_.active_files = qi_info_.loaded ? qi_active_ : std::map<std::string, std::string>{};
+    h3_info_.active_files = h3_info_.loaded ? h3_active_ : std::map<std::string, std::string>{};
+  }
+
   EngineConfig cfg_;
+  std::mutex meta_mu_;
+  ModelInfo qi_info_, h3_info_;
+  std::map<std::string, std::string> paths_, defaults_, qi_active_, h3_active_;
   std::mutex m_;
   std::unique_ptr<QwenImagePipeline> qi_;
   std::unique_ptr<H3Pipeline> h3_;

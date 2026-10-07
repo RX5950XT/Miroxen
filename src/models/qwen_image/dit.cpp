@@ -49,7 +49,8 @@ QwenImageDit::QwenImageDit(const TensorStore& st, int device, QMode compute) : d
     b.k = make_linear(dw_, p + "attn.to_k");
     b.v = make_linear(dw_, p + "attn.to_v");
     b.o = make_linear(dw_, p + "attn.to_out.0");
-    b.gate_up = make_linear(dw_, p + "img_mlp.gate_up");
+    b.gate_up = st.has(p + "img_mlp.gate_up.weight") ? make_linear(dw_, p + "img_mlp.gate_up")
+        : make_linear_concat(dw_, p + "img_mlp.gate_up", p + "img_mlp.gate_layer", p + "img_mlp.proj");
     b.out = make_linear(dw_, p + "img_mlp.out");
     b.norm_q = dw_.f32(p + "attn.norm_q.weight");
     b.norm_k = dw_.f32(p + "attn.norm_k.weight");

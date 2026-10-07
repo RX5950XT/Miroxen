@@ -52,7 +52,7 @@ H3Layout h3_build_ref2va_layout(int64_t T, const std::vector<H3Tag>& text_tags, 
                                 int64_t F_lat, int64_t H, int64_t W, int64_t A);
 // MiniMax-H3 畫布：短邊 short_edge、面積上限 max_pixels、兩軸取最接近的 32 倍數（resolve_canvas_size）。
 void h3_canvas(double aspect_w, double aspect_h, int short_edge, int64_t max_pixels, int& w, int& h);
-int h3_align_frames(int frames);        // 對齊到 17n+5
+int h3_align_frames(int frames);        // 對齊到 17n+5，最少 22 幀（解碼器需求）
 int64_t h3_latent_frames(int frames);   // (F-5)/17*5+2
 int64_t h3_audio_latents(int frames);   // round(F/24*40)
 
@@ -75,6 +75,7 @@ class H3Pipeline {
   struct Prepared {
     H3Layout L;
     std::vector<bf16> txt;
+    double text_seconds = 0;
     std::vector<float> vref, aref;
     int frames = 0;
     int64_t seed = 0;

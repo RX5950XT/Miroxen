@@ -2,6 +2,81 @@
 
 ## 計畫
 
+### 提交、推送與垃圾清理（2026-10-07）
+- [x] 檢查提交範圍、既有驗證與 staged diff，提交已完成的專案變更
+- [ ] 確認 Git 遠端，推送並比對遠端 HEAD
+- [ ] 清理確定可刪的暫存，保留模型、生成作品、驗證資料與運行服務
+
+### 編碼／VAE 效能與分段量測（2026-10-07）
+- [x] 加入圖片／影片分段計時，建立可重跑的 A/B 量測
+- [x] 有界文字編碼快取，完整圖文內容比對與失效測試
+- [x] 圖片 latent 在 GPU 轉換，減少 CPU 往返，驗證數值與實際輸出
+- [x] 建置、受影響測試、真實圖片與影片量測，記錄收益及限制
+
+Review：
+- GPT-6 Luna 子代理分別檢查編碼快取與 VAE 搬運；主代理整合、審核 CUDA 轉置索引並執行 GPU 驗收。既有未提交工作保留，未 commit／push。
+- 共用 Qwen3TextEncoder 精確比對完整 token IDs／視覺嵌入／DeepStack／位置；最近兩筆快取含輸出及 key 最多 128 MiB。模型重建自然清空；LoRA 只改 DiT，因此切換 LoRA 可保留文字快取。超過上限略過，`MX_DISABLE_ENCODER_CACHE=1` 可停用。
+- `build.bat` 成功；`ctest --test-dir build -R "qwen3_encoder_cache_test|qwen3_text_parity_test|qwen3_vl_parity_test|server_test" --output-on-failure` 4/4，`ctest --test-dir build -R "qwen_latent_test|qwen_vae_test|h3_video_vae_test|h3_audio_vae_test|qwen_image_e2e_test" --output-on-failure` 5/5；最後建置後快取／latent／server 3/3 再驗。包含常駐與串流 TE CUDA 命中、逐位元輸出一致、VAE 參考比對與原版 Qwen 出圖。Python 語法及 `git diff --check` 通過。
+- 真實 API：模型已暖機、FP8，三組不同提示詞各原樣重送，交錯比較。圖片 UC-Q8_0／Turbo8／736×1312／8 步：新提示詞中位 6.200 秒、重送 5.784 秒；每對差值中位省 0.452 秒。文字編碼中位 0.414 秒 → 0.00082 秒。影片 FL2VA Q4_K／LightX2V 4 步（API steps=5）／864×480／56 幀：26.640 → 24.650 秒，每對差值中位省 1.980 秒；TE 2.065 秒 → 0.00072 秒。這是重複提示詞的快取收益，不代表首次任意提示詞都會加速相同比例。
+- 新提示詞階段占比（3 次總時間）：圖片 DiT 80.5%、VAE 解碼 10.2%、文字 6.3%、PNG 2.9%；影片 DiT 56.4%、影片 VAE 31.0%、文字 7.8%、音訊解碼／WAV 3.4%、ffmpeg 寫入／結束約 1.1%。階段內包含必要搬運；重疊 GPU／CPU 工作沒有拆成可相加的純核心時間，完整 ctest 未跑。
+- Qwen latent layout／正規化在 GPU 做，移除參考編碼與生成解碼的 CPU 往返。同卡路徑與 N=37／1031 的 CPU 公式逐位元一致；decode 明確保留分步乘加。`build/qwen_latent_test.exe --benchmark` 暖機後交錯 20 次：N=3772 舊 0.9729 ms／GPU 0.0145 ms，每次省 1,931,264 bytes；N=16384 舊 3.9584 ms／GPU 0.0311 ms，省 8,388,608 bytes。這是微型測試，總生成只省毫秒，未宣稱整張快數十倍。
+- 參考圖實際測試：原樣重送 hit、換另一張圖片 miss、移除 Turbo8 後仍 hit 且 40 步生成成功、卸載重載後 cache 回到 0 hits / 1 miss。參考快取最高 80.7 MiB；視覺塔與參考 VAE 本身仍會重算。停用快取對照三次皆記 disabled／bypass，文字階段重送仍需 0.284 秒。
+- FP8 完整出圖並非逐像素決定性；三對圖片平均 RGB 每通道差約 1.2–1.6/255，沒有把整張 PNG 稱為位元相同。紅圍巾編輯輸出已看圖；ffprobe 確認影片 864×480、24 fps、56 幀、2.333333 秒且含音軌。沒有量 720p／10 秒影片，亦未改寫 H3 tile stitch 或驗證 Qwen 跨 GPU VAE 配置；桌面、NVIDIA Broadcast 與 Wallpaper Engine 持續執行，不能拿舊日期數字作直接 A/B。
+- 原始量測／請求／階段耗時在 `out/perf-20261007/current.json`，摘要 `summary.json`；參考圖及失效驗證 `cache_validation.json`、停用對照 `cache-off.json`、日誌 `service.log`。可重跑工具 `tools/perf/pipeline_bench.py`；API 工作結果新增 `result.timings`，定義見 docs/API.md。
+- 更新後服務已恢復 `0.0.0.0:8188`，輸出目錄 `out/perf-20261007/dashboard`；實際預設 UC-Q8_0／40 步／512×512 兩次成功，第二次文字階段 0.00084 秒，health ok。紀錄 `dashboard_validation.json`，測試 8189 服務已停止；既有生成檔保留。
+
+### 新圖片模型、來源文件與目錄清理（2026-10-06）
+- [x] 下載、SHA-256 校驗與切換 UC-Q8_0，實際生成驗證
+- [x] 重寫 README，逐一標示模型／編碼器／VAE／LoRA 來源及原版步數
+- [x] 整理 QA 輸出、隔離確定無用的暫存並驗證受影響範圍
+- [ ] 刪除隔離暫存（自動安全審查拒絕刪除指令，未提供 policy 以外的詳細原因）
+
+
+Review：
+- UC-Q8_0 7,591,557,920 bytes，SHA-256 `cde456c72ea3ecebfc1be783300e972711d875e0c5f1bed33d42b66b156affa8` 與 Hub LFS 一致；Q8_0 保留既有檔案精度，運算預設仍為 FP8。
+- 新 GGUF 的 FFN 分開存放 gate_layer／proj，載入時在 GPU 接合成既有 gate_up 路徑；沒有改寫下載檔，也沒有增加每步 GEMM 次數。原版 fused 格式與 LoRA 還原路徑均保留。
+- `build.bat` 成功；`ctest --test-dir build -R "weights_concat_test|qwen_dit_parity_test|server_test|model_file_test|h3_frames_test" --output-on-failure` 5/5 通過，含舊模型數值比對、接合列順序、輸入形狀驗證、FP8 LoRA 合併／還原。
+- 真實 UC-Q8_0／FP8／512×512：40 步生成 7.20 秒、40 步編輯 11.69 秒、Turbo8 8 步 4.56 秒、移除 Turbo8 後 40 步 7.73 秒。首張請求含載入約 16.10 秒；模型狀態確認使用新檔。圖片生成與紅圍巾編輯已看圖確認，紀錄在 `out/model-swap-20261006/validation.json`。不是 720p 的效能數字。
+- 瀏覽器 `tests/dashboard_check.js` 29/29 通過；新預設 UC-Q8_0 選項已確認。JS 語法與差異空白檢查通過；測試瀏覽器已關閉，服務保留執行。完整 ctest 與新模型的所有 LoRA 畫質組合未驗證。
+- 原始模型、生成作品、官方 HF VAE、`models/ref/` 測試資料保留；37 個零散 QA 檔案集中至 `out/qa/2026-10-06/`。無用 `list/` 虛擬環境、Playwright 歷史與假引擎產物一併隔離；刪除指令遭自動審查拒絕，沒有宣稱已釋放空間。下面歷史紀錄的 `out/dashboard-*.js/.log/.png` 已移至該目錄，生成作品子目錄保持原址。
+
+
+### 頂部模型管理與精簡 API 頁（2026-10-06）
+- [x] 模型狀態與管理移到頂部原生 popover
+- [x] API／硬體左右排列、網址複製及其他電腦使用說明
+- [x] 明暗桌面／手機、模型操作與 LAN 複製驗證
+
+Review：
+- `playwright-cli -s=miroxen-ui run-code --filename tests/dashboard_check.js` 29/29 通過，含頂部模型管理展開／收起、與連線同列、桌面左右欄、手機、明暗對比與既有創作流程；JS 語法及 `git diff --check` 通過。
+- `out/dashboard-model-control.js` 實際透過頂部選單載入 Qwen、切換 H3、卸載成功，顯存與 RAM 回收；`out/dashboard-lan-copy.js` 在 HTTP LAN 頁面複製 API 成功，讀回瀏覽器剪貼簿確認 Base URL，模型清單連結 HTTP 200，Escape 關閉選單，390px popover 無溢出。截圖在 `out/dashboard-compact-*` 與 `out/dashboard-top-model-*`。
+- 只修改前端及說明，未重跑 C++ 建置／GPU 品質或效能測試；另一台實體電腦的連線仍未驗證，防火牆權限限制同前。
+
+
+### API／硬體合併與模型管理（2026-10-06）
+- [x] 合併 API 與硬體頁，顯示區域網路網址
+- [x] 手動載入／切換／卸載模型，生成與管理操作互斥
+- [x] 建置、API、瀏覽器與真實模型記憶體釋放驗證
+
+Review：
+- `build.bat` 成功；`ctest --test-dir build -R "server_test|model_file_test|h3_frames_test" --output-on-failure` 3/3 通過，涵蓋載入、切換、卸載、無效參數、生成中拒絕管理、金鑰驗證與 JSON 格式限制；JS 語法與 `git diff --check` 通過。
+- `playwright-cli -s=miroxen-ui run-code --filename tests/dashboard_check.js` 23/23 通過；`out/dashboard-model-control.js` 實際點擊 Qwen → H3 → 卸載成功，桌面／390px 手機無溢出與 JS 錯誤。
+- H3 卸載後程序 RAM 7.38 → 0.40 GiB，GPU0／GPU1 釋放約 5.75／2.93 GiB；卸載後真實圖片工作自動重新載入並成功輸出。服務保持執行，模型最後已卸載；測試瀏覽器關閉。
+- 已由本機透過 `http://192.168.2.176:8188/v1/network` 驗證 LAN 位址回應；另一台裝置尚未驗證。沒有管理員權限，無法設定 Windows 防火牆入站規則。
+
+
+### 儀表板與監控（2026-10-06）
+- [x] 對齊模型檔、自訂尺寸、圖片任務、影片秒數、參考素材與 LoRA 設定
+- [x] 整理 UI／UX、API 狀態及 CPU／RAM／GPU 監控
+- [x] 建置、API 驗證、桌面／手機瀏覽器流程與實際生成驗證
+
+Review：
+- `build.bat` 成功；`ctest --test-dir build -R "server_test|model_file_test|h3_frames_test" --output-on-failure`，3/3 通過；JS 語法與 `git diff --check` 通過。
+- `npx --package @playwright/cli playwright-cli -s=miroxen-ui run-code --filename tests/dashboard_check.js`，21 項通過：LoRA 排程／任務篩選、素材互斥、模型檔、尺寸、秒數、監控、API 預覽、手機版、明暗按鈕對比與零 JavaScript 錯誤。
+- 真實引擎：Qwen Q4_K＋官方 VAE 出圖、切回 Q8_0＋紋理修正 VAE 成功；透明圖／去背 PNG 有透明區域，雙圖遮罩修改成功；FL2VA 與 Ref2VA 均生成含音軌的 24 fps 影片。生成中 `/v1/models` 回應 2 ms；Ref2VA 狀態顯示實際 DiT。結果與紀錄在 `out/dashboard-*`。
+- 金鑰模式：假引擎連線、取消、生成、下載通過，金鑰未寫入 browser storage；已關閉測試服務並刪除臨時金鑰。
+- 修正最短影片：輸入 5 幀會對齊至 22 幀，避免 VAE 解碼失敗；影片 1 個取樣點改為立即拒絕。這輪真實生成用小尺寸檢查流程，沒有重跑 720p／10 秒效能或逐項畫質評分。
+
+
 - [x] 研究兩個模型、類似專案、本機硬體 → `docs/RESEARCH.md`
 - [x] 存放庫骨架：CMake + CUDA（sm_120;86）、核心型別、介面標頭
 - [x] 核心元件（平行分工）

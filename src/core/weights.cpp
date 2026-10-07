@@ -15,6 +15,35 @@ static DevBuf upload_raw(const WeightRef& r, int dev) {
   return b;
 }
 
+static DevBuf upload_concat(const WeightRef& a, const WeightRef& b, int dev) {
+  MX_CHECK(a.shape.size() == 2 && b.shape.size() == 2 && a.shape[1] == b.shape[1] && a.type == b.type &&
+           a.shape[1] % gtype_block(a.type) == 0 && dequant_supported(a.type),
+           "張量 %s 與 %s 無法接合：形狀、型別或區塊不相容", a.name.c_str(), b.name.c_str());
+  DevBuf out(a.nbytes + b.nbytes, dev);
+  MX_CUDA(cudaMemcpy(out.get(), a.data, a.nbytes, cudaMemcpyHostToDevice));
+  MX_CUDA(cudaMemcpy(static_cast<char*>(out.get()) + a.nbytes, b.data, b.nbytes, cudaMemcpyHostToDevice));
+  return out;
+}
+
+const DevTensor& DeviceWeights::raw_concat(const std::string& name, const std::string& first,
+                                          const std::string& second) {
+  MX_CHECK(!st_.has(name), "張量 %s 已存在，不能覆寫為接合張量", name.c_str());
+  auto it = raw_.find(name);
+  if (it != raw_.end()) {
+    MX_CHECK(concat_sources_.at(name) == std::make_pair(first, second), "張量 %s 接合來源不同", name.c_str());
+    return it->second.second;
+  }
+  const auto& a = st_.get(first);
+  const auto& b = st_.get(second);
+  DevBuf buf = upload_concat(a, b, dev_);
+  DevTensor t{buf.get(), a.type, {a.shape[0] + b.shape[0], a.shape[1]}};
+  concat_sources_[name] = {first, second};
+  bytes_ += buf.size();
+  auto& slot = raw_[name];
+  slot = {std::move(buf), std::move(t)};
+  return slot.second;
+}
+
 const DevTensor& DeviceWeights::raw(const std::string& name) {
   auto it = raw_.find(name);
   if (it != raw_.end()) return it->second.second;
@@ -71,9 +100,11 @@ void DeviceWeights::quantize(Linear& l, QMode m) {
 void DeviceWeights::merge_loras(Ctx& c, Linear& l) {
   if (!l.qw || !l.qw->q.get() || (l.loras.empty() && !l.qw->merged)) return;
   c.use();
-  const WeightRef& r = st_.get(l.name + ".weight");
-  DevBuf raw = upload_raw(r, dev_), tmp(size_t(l.in) * l.out * sizeof(bf16), dev_);
-  dequant_to_bf16(raw.get(), r.type, l.in * l.out, tmp.as<bf16>(), c.stream);
+  const auto src = concat_sources_.find(l.name + ".weight");
+  DevBuf raw = src == concat_sources_.end() ? upload_raw(st_.get(l.name + ".weight"), dev_)
+      : upload_concat(st_.get(src->second.first), st_.get(src->second.second), dev_);
+  DevBuf tmp(size_t(l.in) * l.out * sizeof(bf16), dev_);
+  dequant_to_bf16(raw.get(), l.w.type, l.in * l.out, tmp.as<bf16>(), c.stream);
   const float one = 1.f;
   for (auto& d : l.loras) {
     if (d->f32) continue;
@@ -98,6 +129,18 @@ Linear make_linear(DeviceWeights& dw, const std::string& prefix) {
   l.out = l.w.shape[0];
   l.in = l.w.shape[1];
   l.bias = dw.f32_or_null(prefix + ".bias");
+  return l;
+}
+
+Linear make_linear_concat(DeviceWeights& dw, const std::string& prefix,
+                          const std::string& first, const std::string& second) {
+  MX_CHECK(!dw.store().has(first + ".bias") && !dw.store().has(second + ".bias"),
+           "%s：接合線性層不支援 bias", prefix.c_str());
+  Linear l;
+  l.name = prefix;
+  l.w = dw.raw_concat(prefix + ".weight", first + ".weight", second + ".weight");
+  l.out = l.w.shape[0];
+  l.in = l.w.shape[1];
   return l;
 }
 

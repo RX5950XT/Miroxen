@@ -10,7 +10,7 @@
 namespace mx {
 
 struct ServerOptions {
-  std::string host = "127.0.0.1";
+  std::string host = "0.0.0.0";
   int port = 8188;
   std::string api_key;  // 空字串表示不驗證
   std::string web_dir = "web";

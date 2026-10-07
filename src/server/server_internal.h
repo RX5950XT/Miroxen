@@ -39,6 +39,7 @@ struct Job {
   std::string url;
   int64_t seed = 0;
   double seconds = 0;
+  std::map<std::string, double> timings;
   bool has_result = false;
   bool want_b64 = false;
   std::string response_format = "b64_json";
@@ -92,9 +93,11 @@ class ServerState {
   // 找不到回 false。排隊中的工作會直接標成 cancelled。
   bool cancel(const std::string& id);
   int queue_length();
+  void control_model(const std::string& id, const std::map<std::string, std::string>& files, const std::string& compute);
   void shutdown();
 
  private:
+  bool changing_model = false;
   void worker_loop();
   void execute(const std::shared_ptr<Job>& job);
   void prune_locked();
@@ -109,6 +112,7 @@ std::string jobs_to_json(const std::vector<std::shared_ptr<Job>>& jobs);
 std::string image_sync_json(const Job& job);
 std::string models_json(const std::vector<ModelInfo>& models);
 std::string loras_json(const ServerOptions& opt);
-std::string system_json(const std::vector<GpuInfo>& gpus, int queue_length);
+std::string system_json(const std::vector<GpuInfo>& gpus, int queue_length, uint64_t requests = 0,
+                        uint64_t errors = 0, double uptime = 0, bool authenticated = false);
 
 }  // namespace mx

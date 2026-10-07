@@ -31,6 +31,7 @@ class DeviceWeights {
  public:
   DeviceWeights(const TensorStore& st, int device) : st_(st), dev_(device) {}
   const DevTensor& raw(const std::string& name);
+  const DevTensor& raw_concat(const std::string& name, const std::string& first, const std::string& second);
   const float* f32(const std::string& name);      // 小張量（norm、bias）轉 f32 常駐
   const float* f32_or_null(const std::string& name) { return st_.has(name) ? f32(name) : nullptr; }
   // 把 Linear 權重轉成區塊縮放格式（FP8/FP4，載入時一次）並釋放原始權重。BF16 不動作。
@@ -47,6 +48,7 @@ class DeviceWeights {
   int dev_;
   std::map<std::string, std::pair<DevBuf, DevTensor>> raw_;
   std::map<std::string, DevBuf> f32_;
+  std::map<std::string, std::pair<std::string, std::string>> concat_sources_;
   size_t bytes_ = 0;
 };
 
@@ -79,6 +81,9 @@ struct Linear {
 
 // prefix 例如 "transformer_blocks.0.attn.to_q"，讀 prefix.weight（與 prefix.bias，若有）。
 Linear make_linear(DeviceWeights& dw, const std::string& prefix);
+// 分開存放的 gate/proj 沿輸出列接合，保留單次 GEMM 與 LoRA 合併路徑。
+Linear make_linear_concat(DeviceWeights& dw, const std::string& prefix,
+                          const std::string& first, const std::string& second);
 // 最大權重 bf16 所需的反量化暫存大小（給 Ctx scratch 用）。
 size_t linear_scratch_bytes(const Linear& l);
 

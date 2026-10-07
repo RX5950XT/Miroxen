@@ -1,136 +1,181 @@
 # Miroxen
 
-專為 **Qwen-Image-2.1**（文生圖／編輯）與 **MiniMax-H3**（文字／首尾幀／參考素材 → 影片 + 立體聲）
-重新撰寫的 C++/CUDA 推論引擎，支援 GGUF 量化權重與社群 LoRA，提供 HTTP API 與簡易操作面板。
+針對 **Qwen-Image-2.1** 圖片生成／編輯與 **MiniMax-H3** 影音生成的 C++／CUDA 推論引擎。
+提供命令列、HTTP API 與瀏覽器工作台；推論不依賴 ComfyUI 或 Python。
 
-> 開發中。研究筆記：[docs/RESEARCH.md](docs/RESEARCH.md)；進度：[tasks/todo.md](tasks/todo.md)。
+本機配置：RTX 5060 Ti 16 GB＋RTX 3060 Ti 8 GB、Ryzen 7 5700X、96 GB RAM。
+圖片預設使用 **abenzerps 的 UC-Q8_0 GGUF**，影片使用 unsloth 的 FL2VA／Ref2VA Q4_K。
+模型量化與 `--compute` 的運算精度是兩個獨立設定；目前運算預設為 FP8。
 
-## 建置（Windows）
+## 建置與啟動
 
-需求：Visual Studio 2022、CUDA 13.x、CMake ≥ 3.28、Ninja。
+Windows 需要 Visual Studio 2022 C++ 工具、CUDA 13.3、CMake ≥ 3.28、Ninja。
+影片功能另需 `ffmpeg`、`ffprobe` 在 PATH。
 
 ```bat
 build.bat
+build\miroxen.exe serve --port 8188
+```
+
+[開啟本機工作台](http://127.0.0.1:8188)。服務預設綁定 `0.0.0.0`，可從區域網路存取。
+`build.bat` 會設定 UTF-8 字碼頁，讓中文版 MSVC 的標頭依賴能正確被 Ninja 辨識。
+
+- **創作**：圖片／影音、參考素材、LoRA、模型檔／量化版本、運算精度與取樣設定。
+- **頂部模型選單**：連線狀態旁顯示目前模型，點開可載入、切換或卸載。只保留一顆模型；生成中不能管理模型。
+- **API／硬體**：左右兩欄顯示可複製網址、區網使用說明，以及 CPU／RAM／雙 GPU 的用量、溫度與功耗。窄螢幕改為上下排列。
+
+詳細 API 契約：[docs/API.md](docs/API.md)。
+
+## 其他區網電腦怎麼用
+
+1. 兩台電腦連到同一網路，這台電腦保持服務執行。
+2. 在 API／硬體頁找與對方同網段的網址；另一台電腦開「工作台」連結即可生成，無需安裝模型。
+3. 支援圖片生成 API 的程式，Base URL 填 `http://<這台電腦的區網 IP>:8188/v1`；圖片模型 ID 為 `qwen-image-2.1`。
+4. 有設定 `--api-key` 時，客戶端需提供同一金鑰：`Authorization: Bearer <API key>`。
+
+圖片使用 `POST /v1/images/generations`；圖片／影音非同步工作使用 `POST /v1/jobs`。
+本服務沒有聊天完成端點，不能當成一般聊天模型。對方不要填 `127.0.0.1` 或 `localhost`。
+VPN 網址需要雙方加入同一 VPN；Windows 防火牆需允許 TCP 8188 入站，設定需要管理員權限。
+可用 `http://<IP>:8188/health` 確認是否連通。
+
+若只要本機存取：
+
+```bat
+build\miroxen.exe serve --host 127.0.0.1 --port 8188
+```
+
+## 模型、編碼器與 VAE 來源
+
+以下是這台電腦的已安裝檔案；粗體為預設。來源已對照下載紀錄與 Hub 檔案雜湊。
+模型權重不提交 Git，各模型／LoRA 依來源頁面的授權使用。
+
+### 圖片：`models/qwen-image-2.1/`
+
+原始架構與模型：[Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1)。
+
+| 元件 | 檔案 | 來源 |
+|---|---|---|
+| **DiT · Q8_0** | **`qwen-image-2.1-UC-Q8_0.gguf`** | [abenzerps/Qwen-Image-2.1-Uncensored-GGUF](https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF) |
+| 原版 DiT · Q8_0／Q4_K | `qwen_image_2.1-Q8_0.gguf`、`qwen_image_2.1-Q4_K.gguf` | [leejet/Qwen-Image-2.1-GGUF](https://huggingface.co/leejet/Qwen-Image-2.1-GGUF) |
+| 原版 DiT · Q4_K_M | `qwen-image-2.1-Q4_K_M.gguf` | [unsloth/Qwen-Image-2.1-GGUF](https://huggingface.co/unsloth/Qwen-Image-2.1-GGUF) |
+| **文字編碼器 · Q4_K_M**／備選 Q8_0 | `Qwen3VL-8B-Instruct-Q4_K_M.gguf`、`Qwen3VL-8B-Instruct-Q8_0.gguf` | [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) |
+| 視覺編碼器 · F16，編輯時載入 | `mmproj-Qwen3VL-8B-Instruct-F16.gguf` | [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) |
+| **紋理修正 VAE · BF16** | **`vae/texture_fix_vae_for_qwen_image_2.1_bf16.safetensors`** | [madebyollin/texture-fix-vae-for-qwen-image-2.1](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1/tree/1f80456b6de9d89043c133ff1f3875449b8bd016) |
+| 官方 VAE · BF16 | `vae/qwen_image_2.1_vae_bf16.safetensors` | [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1) |
+| Tokenizer／設定／數值比對用原始 VAE | `hf/processor/`、`hf/vae/` 等 | [Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2.1) |
+
+UC-Q8_0：7,591,557,920 bytes，來源 revision `6b34e59458d3eb7ba6a6f86a116aed5253dc02c3`，
+SHA-256：`cde456c72ea3ecebfc1be783300e972711d875e0c5f1bed33d42b66b156affa8`。
+來源倉庫同時有一般版與 `UC` 版，這裡選的是 `UC` 檔案。名稱與行為說明依發布者模型卡；本專案未量測其內容限制或與原版的畫質差異。
+
+目前紋理修正 VAE 固定在表中的舊 revision，SHA-256 為
+`05e9af8da4697d1a5118b674c3d90e95f932702d2c5a8900d7d4f05076403cc7`，與作者目前最新檔案不同。
+只有解碼器微調，編碼器與原版相同。未安裝它時自動退回官方 VAE。
+舊原版 DiT 保留供回退及既有數值比對測試使用；可從面板選取，或使用 `--qi-dit` 指定。
+
+下載新預設：
+
+```bat
+hf download abenzerps/Qwen-Image-2.1-Uncensored-GGUF qwen-image-2.1-UC-Q8_0.gguf --revision 6b34e59458d3eb7ba6a6f86a116aed5253dc02c3 --local-dir models/qwen-image-2.1
+```
+
+### 影音：`models/minimax-h3/`
+
+原始模型：[MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3)。
+
+| 元件 | 檔案 | 來源 |
+|---|---|---|
+| **文字／首尾幀 DiT · Q4_K** | **`minimax_h3_fl2va_pruned-Q4_K.gguf`** | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) |
+| **參考生成 DiT · Q4_K** | **`minimax_h3_ref2va_pruned-Q4_K.gguf`** | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) |
+| **文字／視覺編碼器 · Q4_K_M** | **`qwen3vl_32b_minimax_h3-Q4_K_M.gguf`** | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) |
+| **影片 VAE · FP16** | **`vae/minimax_h3_video_vae_fp16.safetensors`** | [unsloth 配套檔](https://huggingface.co/unsloth/MiniMax-H3-GGUF/tree/d629413c2e5b51b38c453668b75ca3b06ca92703/vae)；[Comfy-Org 原始轉換檔](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| **音訊 VAE · FP32** | **`vae/minimax_h3_audio_vae_fp32.safetensors`** | [unsloth 配套檔](https://huggingface.co/unsloth/MiniMax-H3-GGUF/tree/d629413c2e5b51b38c453668b75ca3b06ca92703/vae)；[Comfy-Org 原始轉換檔](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| Tokenizer／設定／數值比對用原始 VAE | `hf/tokenizer/`、`hf/vae/`、`hf/audio_vae/` 等 | [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) |
+
+FL2VA 與 Ref2VA 是不同 checkpoint，給參考素材時會自動換用 Ref2VA。
+參考圖片最多 9 張、影片 3 段、音訊 3 段，共最多 12 個；音訊不能單獨作為參考。
+影片輸出固定 24 fps，幀數向上對齊 `17n+5`、最少 22 幀。
+例如目標 10 秒填 240 幀，實際生成 243 幀（10.125 秒）；高解析度長影片仍可能超出 16 GB 顯存。
+
+## LoRA 來源與排程
+
+檔案放在 `models/loras/`。畫風 LoRA 不等於加速 LoRA；只加畫風時仍用原版步數。
+
+| 模型／用途 | 檔案 | 來源 | Miroxen 設定 |
+|---|---|---|---|
+| 圖片 · 6 步加速 | `Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r256.safetensors` | [Viggle](https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo) | `sigmas: [1, .9375, .875, .75, .5, .25]`、`shift_terminal: false`、CFG 1 |
+| 圖片 · 8 步加速 | `turbo8_lora_step2500.safetensors` | [chriswritescode/Turbo8-LoRA-Qwen-Image-2.1](https://huggingface.co/chriswritescode/Turbo8-LoRA-Qwen-Image-2.1) | `steps: 8`、`shift_terminal: false`、CFG 1 |
+| 圖片 · ZZZ Chibi 畫風 | `zzz_chibi_v2_st2500.safetensors` | [wesjos/Qwen-Image2.1-ZenlessZoneZeroChibi-Lora](https://huggingface.co/wesjos/Qwen-Image2.1-ZenlessZoneZeroChibi-Lora) | 依畫風需求調強度，不降低原版步數 |
+| 影音 · FL2VA 8 步加速 | `minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors` | [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | `steps: 9`、`video_shift: 6` |
+| 影音 · FL2VA 4 步加速 | `minimax_h3_fl2v_turbo_4step_v1.2_768p_bf16.safetensors` | [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | `steps: 5`、`video_shift: 6` |
+| 影音 · Ref2VA 8 步加速 | `minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors` | [lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo) | `steps: 9`、`video_shift: 12` |
+
+面板勾選加速 LoRA 會套用設定；取消後回復原版排程。互不相容的 FL2VA／Ref2VA LoRA 分開列出。
+支援 diffusers／PEFT／kohya 命名。FP8／FP4 路徑會併入權重，H3 在逐層搬運時合併；BF16 路徑每步即時計算。
+新預設已實測文生圖、編輯、Turbo8 套用及移除後還原；其他 LoRA 組合與完整畫質比較尚未完成。
+
+### 不用加速 LoRA 時的步數
+
+| 模型 | 建議起點 | 說明 |
+|---|---|---|
+| Qwen-Image-2.1：生成／編輯／透明圖 | **40 步** | [官方範例](https://huggingface.co/Qwen/Qwen-Image-2.1#quick-start)；原版排程 `shift_terminal: true`，清空自訂 sigma |
+| MiniMax-H3：FL2VA／Ref2VA | **30 個取樣點** | Miroxen 目前預設，實際 **29 次 DiT 計算**；影片 shift 12 |
+
+這是兩顆模型的起點，不是所有擴散模型的通用規則。較少步數可作預覽，但細節與動作穩定度需逐張／逐段確認。
+H3 的 `steps` 包含最後的零點，因此「8 次計算」在本 API 填 9；[上游排程實作](https://github.com/huggingface/diffusers/blob/main/src/diffusers/schedulers/scheduling_minimax_h3.py)亦區分取樣點與計算次數。
+H3 的 30 是本專案採用的基準，沒有把它說成官方保證的最佳步數。增加步數也不保證每張圖／每段影片都更好。
+
+## 命令列範例
+
+```bat
+build\miroxen.exe image -p "一隻在雪地裡的紅狐狸" -W 1024 -H 1024 --steps 40
+build\miroxen.exe image -p "把背景換成夜晚的城市" --ref 原圖.png --steps 40
+build\miroxen.exe video -p "A red panda eating bamboo" -W 864 -H 480 --frames 56 --steps 30
+build\miroxen.exe image -p "A red panda" --lora turbo8_lora_step2500.safetensors:1 --steps 8 --shift-terminal 0
+```
+
+圖片可加入最多 10 張參考圖。未指定尺寸時依最後一張參考圖比例，約 1024² 像素。
+透明圖／去背使用模型的 RGBA 能力；局部修改靠模型理解遮罩，不能保證遮罩外像素完全不變。
+`--compute bf16|fp8|fp4` 控制運算精度；FP8／FP4 需要 Blackwell 路徑，不支援時退回 BF16。
+本機分工為 GPU0 執行主要 DiT、GPU1 分擔文字編碼；實際配置以面板模型資訊為準。
+
+## 目錄與驗證
+
+圖片與影片共用的文字編碼器會保留最近兩筆完整圖文輸入及編碼結果，最多 128 MiB；相同輸入可省去重算。
+比對包含圖片特徵內容，換提示詞或參考內容會重新計算；切換／卸載模型會清除快取。視覺塔及參考素材 VAE 本身仍會執行。
+設 `MX_DISABLE_ENCODER_CACHE=1` 可關閉快取做對照。快取不改步數、量化或 LoRA；圖片 latent 的排列與正規化改在 GPU 執行，省掉 CPU 往返。
+API 工作結果的 `timings` 列出各階段秒數，欄位定義見 [API 文件](docs/API.md)。
+
+服務啟動後可重跑實測（會生成圖片與短片，模型須已安裝）：
+
+```bat
+python tools/perf/pipeline_bench.py --base http://127.0.0.1:8188 --out out/perf/benchmark.json
+```
+
+| 目錄 | 內容 |
+|---|---|
+| `src/` | C++／CUDA 引擎、模型管線、HTTP 服務 |
+| `web/` | 原生 HTML／CSS／JavaScript 工作台 |
+| `tests/` | 單元／數值比對／瀏覽器檢查 |
+| `tools/` | 產生數值比對資料的 Python 工具，推論時不需要 |
+| `third_party/` | 既有第三方標頭 |
+| `models/` | 模型、LoRA、tokenizer；`models/ref/` 是測試資料，並非待刪垃圾 |
+| `build/` | CMake／Ninja 產物，保留可執行服務與增量建置 |
+| `out/` | 生成作品；`out/qa/` 集中 QA 截圖、腳本與紀錄；`2026-10-06/unused-venv/` 等為隔離的無用暫存，尚未刪除 |
+| `docs/`、`tasks/` | API／研究文件與進度、已知限制 |
+
+```bat
+ctest --test-dir build -R "weights_concat_test|qwen_dit_parity_test|server_test|model_file_test|h3_frames_test" --output-on-failure
 ctest --test-dir build --output-on-failure
 ```
 
-`build.bat` 會先切到 UTF-8 字碼頁（`chcp 65001`）。不這樣做的話，ninja 看不懂中文版 MSVC 吐出的標頭依賴訊息，
-改了標頭卻不會重編，所以請一律用 `build.bat` 建置。
-
-## 使用
+完整測試含 GPU／模型／參考資料檢查，需已安裝對應檔案。
+瀏覽器檢查（本機使用 Edge，另開獨立測試環境）：
 
 ```bat
-build\miroxen.exe image -p "一隻在雪地裡的紅狐狸" -W 1024 -H 1024 --steps 20
-build\miroxen.exe video -p "A red panda eating bamboo" -W 864 -H 480 --frames 56 --steps 30
-build\miroxen.exe serve --port 8188   :: 開瀏覽器到 http://127.0.0.1:8188 使用操作面板
+npx --package @playwright/cli playwright-cli -s=miroxen-ui open http://127.0.0.1:8188 --browser msedge
+npx --package @playwright/cli playwright-cli -s=miroxen-ui run-code --filename tests/dashboard_check.js
+npx --package @playwright/cli playwright-cli -s=miroxen-ui close
 ```
-
-模型放在 `models/qwen-image-2.1/`、`models/minimax-h3/`，任何 GGUF 量化（Q2_K～Q8_0、IQ4、MXFP4、NVFP4）都能讀，
-可用 `--qi-dit` / `--h3-dit` 指定檔案。影片功能需要 `ffmpeg`、`ffprobe` 在 PATH。API 說明見 [docs/API.md](docs/API.md)。
-
-## 影像編輯（Qwen-Image-2.1）
-
-給參考圖就變成編輯模式，最多 10 張（命令列 `--ref` 可重複，API 用 `images` 陣列）：
-
-```bat
-build\miroxen.exe image -p "把背景換成夜晚的城市" --ref 原圖.png --steps 30
-```
-
-- 視覺塔用 `models/qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf`，第一次編輯時才載入。
-- 不給 `-W`／`-H`（API：`"size":"auto"`）時，依最後一張參考圖的比例出圖，約 1024² 像素。
-- 實測：1024² 編輯 30 步 fp8 約 28 秒（含載入）；下「不改」的指令能忠實還原原圖。
-- 與 diffusers 官方逐段比對：視覺塔誤差 5.6%（官方自己 bf16 對 fp32 也有 5.5%），帶參考圖的 DiT 1.7–1.9%。
-- 局部修改：可以直接在參考圖上畫圈，或另外附一張黑底白色的遮罩圖當第二張參考圖，提示詞寫明
-  「Picture 2 is a mask. In Picture 1, ... only inside the white area of the mask」。實測只改白色區域，其他地方幾乎不動。
-- 顯存：兩張 1024² 參考圖時 16 GB 卡幾乎用滿；顯卡上同時有其他程式（例如動態桌布佔 3 GB）會溢出到系統記憶體，
-  30 步從約 30 秒變成 5 分鐘以上。參考圖多時建議關掉其他吃顯存的程式或把輸出尺寸調小。
-
-## 紋理修正 VAE（預設）
-
-[madebyollin/texture-fix-vae-for-qwen-image-2.1](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1)
-是官方 VAE 解碼器的微調版，去掉照片類細節（青苔、草地）上的棋盤格紋。只改解碼器，編碼器和官方相同，所以編輯讀參考圖不受影響。
-`models/qwen-image-2.1/vae/` 裡有 `texture_fix_vae_for_qwen_image_2.1_bf16.safetensors` 就預設用它，沒有就用官方 VAE；
-要指定官方版：
-
-```bat
-build\miroxen.exe image -p "..." --qi-vae models\qwen-image-2.1\vae\qwen_image_2.1_vae_bf16.safetensors
-```
-
-實測同一組 latent，紋理明顯乾淨；作者標示 PSNR 略低（32.86 → 32.46，PSNR 偏好較糊的結果）。
-透明圖（RGBA）也能用：同 seed 比較，主體與邊緣幾乎相同（透明度 PSNR 37 dB），而且背景更乾淨
-（官方 VAE 有 66% 背景像素殘留 1–9 的透明度，紋理修正版幾乎全是 0）。
-
-## 自訂 sigma 節點
-
-`--sigmas 1,0.9375,0.875,0.75,0.5,0.25`（API：`sigmas` 陣列）直接指定排程節點，步數＝節點數。
-給步數蒸餾 LoRA 用，例如下面的 Viggle 6 步加速。
-
-## 影片：首尾幀與參考生成（MiniMax-H3）
-
-**首尾幀（FL2VA）**：`--first 首幀.png --last 尾幀.png`，可以只給其中一張（API：`first_frame`／`last_frame`）。
-沒給尺寸時依首幀比例用官方畫布（短邊 768）。關鍵幀會經過 32B 編碼器 GGUF 內建的視覺塔。
-
-**參考生成（Ref2VA）**：依序給圖片、影片、音訊，提示詞裡用 `<Picture 1>`、`<Video 1>`、`<Audio 1>` 指稱
-（API：`references: [{type, data}]`）：
-
-```bat
-build\miroxen.exe video -p "<Picture 1> 的狗在海邊跑" --ref image=狗.png --ref video=片.mp4 --ref audio=聲.wav --steps 9 --shift 12 --lora minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors
-```
-
-- 上限：圖 ≤ 9、影片 ≤ 3、音訊 ≤ 3，總共 ≤ 12；音訊不能單獨用；不能和首尾幀同時用。
-- 影片自帶的音軌會一起參考，標成 `<Audio j>`，排在該段 `<Video k>` 前面。
-- 需要 Ref2VA checkpoint `models/minimax-h3/minimax_h3_ref2va_pruned-Q4_K.gguf`
-  （[unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF)），引擎會自動換 DiT。
-- 參考圖預設縮到短邊 2048（官方），可用 `--ref-edge`（API：`ref_image_short_edge`）調小，省時間與顯存。
-- 參考影片預設畫布不超過輸出畫布（快約一倍）；`--ref-native 1`（API：`ref_native_canvas: true`）改回官方 768p。
-- 實測（864×480・56 幀、8 步加速 LoRA）：一張參考圖約 75 秒；一段 56 幀參考影片約 151 秒（參考編碼 53 秒、DiT 78 秒）。
-
-**shift 與步數**：`--shift`（API：`video_shift`）是影片排程的 shift，官方 12，LightX2V 768p 加速 LoRA 建議 6。
-H3 的 `steps` 是取樣點數，實際前向次數＝steps − 1，所以「8 步」加速 LoRA 要用 `--steps 9`。
-
-## 運算精度（`--compute`）
-
-GGUF 量化只決定權重檔大小；`--compute` 決定 DiT 實際用哪種 tensor core 計算。fp8／fp4 用 Blackwell（RTX 50 系列）
-的區塊縮放矩陣乘法，其他顯卡自動退回 bf16。RTX 5060 Ti 實測：
-
-| 精度 | 矩陣乘法 | Qwen-Image 1024²・20 步 | H3 864×480・56 幀・30 步 | 畫質 |
-|---|---|---|---|---|
-| bf16 | 41 TFLOPS | 35.0 秒 | 267 秒 | 基準 |
-| fp8（預設） | 152 TFLOPS | 14.0 秒 | 110 秒 | 幾乎相同（圖 31.1 dB） |
-| fp4 | 293 TFLOPS | 9.7 秒 | 93.5 秒 | 乾淨，但構圖與提示詞遵循度會變 |
-
-以上是 GPU 沒有其他程式時量的；同時開遊戲、動態桌布等吃顯卡的程式，實測會慢約 10–20%。
-
-Qwen 的 VAE 解碼改用自寫卷積核心（不展開 im2col），2048² 從 8.3 秒降到 2.4 秒。
-fp8／fp4 模式下影片 VAE 解碼器的 FFN 也用 FP8（PSNR 40.8 dB）。
-
-fp8／fp4 模式下注意力也改用 INT8（Q·K）＋ FP8（P·V）tensor core（SageAttention2 做法），比 bf16 注意力快 2.4–2.9 倍，
-誤差約 0.4–1.4%。
-
-H3 的 DiT（約 10 GiB）與 32B 文字編碼器（約 14 GiB）都是逐層直接從模型檔讀、送上 GPU 才轉格式，
-不另外鎖住整份副本：整個程式只佔約 1.7 GB 記憶體，檔案內容交給作業系統快取（記憶體吃緊時可回收）。
-
-## LoRA
-
-LoRA 放在 `models/loras/`，命令列用 `--lora 檔名:強度`（只給檔名會到 `models/loras/` 找），API／面板用 `loras` 欄位。支援 diffusers／PEFT（`lora_A/lora_B`）
-與 kohya（`lora_down/lora_up` + `alpha`）命名。fp8／fp4 模式下，換 LoRA 時會把它直接併進量化權重（1.3 GB 的 rank 256 約 3 秒），
-之後出圖不會變慢；bf16 模式則每步即時計算。H3 的 fp8 串流模式則是在搬運權重時順手併入，不佔取樣時間。
-
-Qwen-Image 實測：
-- [Zenless Zone Zero Chibi](https://huggingface.co/wesjos/Qwen-Image2.1-ZenlessZoneZeroChibi-Lora)（畫風，rank 16）：192 層全部對應。
-- [Turbo8](https://huggingface.co/chriswritescode/Turbo8-LoRA-Qwen-Image-2.1)（8 步加速，rank 128，含調變與時間嵌入層）：227 層全部對應。
-  用法 `--steps 8 --shift-terminal 0`（API：`"steps":8,"shift_terminal":false`，不設 `cfg_scale`），1024² 約 8.4 秒。
-- [Viggle turbo](https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo)（6 步加速，`Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r256.safetensors`）：
-  用法 `--sigmas 1,0.9375,0.875,0.75,0.5,0.25 --shift-terminal 0`，864×480 約 5.5 秒。
-
-MiniMax-H3 加速 LoRA（[lightx2v/Minimax-h3-Turbo](https://huggingface.co/lightx2v/Minimax-h3-Turbo)）：
-
-| 檔案 | 用途 | 參數 |
-|---|---|---|
-| `minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors` | 文生影片／首尾幀 | `--steps 9 --shift 6` |
-| `minimax_h3_fl2v_turbo_4step_v1.2_768p_bf16.safetensors` | 文生影片／首尾幀 | `--steps 5` |
-| `minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors` | 參考生成 | `--steps 9 --shift 12` |
-
-- 縮放用檔案 metadata 的 `alpha`（8，rank 128 → 8/128）。
-- diffusers 命名的 `ff.net.0.proj` 輸出是 [value; gate]，載入時自動對調成原始 checkpoint 的 [gate; value]。
-- 實測 864×480・56 幀：8 步加速＋首尾幀約 55 秒（原版 30 步約 144 秒）；文生影片 8 步約 42 秒（DiT 28 秒、影片解碼 9 秒）。
+研究：[docs/RESEARCH.md](docs/RESEARCH.md)；進度與實測紀錄：[tasks/todo.md](tasks/todo.md)。
+H3-Regenerate-2K、Qwen 提示詞改寫模型仍未支援；本專案沒有宣稱全球最快。

@@ -9,6 +9,7 @@
 
 #include "core/common.h"
 #include "server/image_io.h"
+#include "models/minimax_h3/pipeline.h"
 
 namespace mx {
 namespace {
@@ -50,10 +51,14 @@ bool ffmpeg_available() {
 }  // namespace
 
 std::vector<ModelInfo> FakeEngine::models() {
-  return {
-      {"qwen-image-2.1", "image", true, "fake"},
-      {"minimax-h3", "video", true, "fake"},
+  auto out = std::vector<ModelInfo>{
+      {"qwen-image-2.1", "image", loaded_image_.load(), "fake"},
+      {"minimax-h3", "video", loaded_video_.load(), "fake"},
   };
+  out[0].files = {{"dit", {"test-Q8_0.gguf", "test-Q4_K.gguf"}}, {"vae", {"test-vae.safetensors"}}};
+  out[0].defaults = {{"dit", "test-Q8_0.gguf"}, {"vae", "test-vae.safetensors"}};
+  out[0].compute = "fp8";
+  return out;
 }
 
 std::vector<GpuInfo> FakeEngine::gpus() {
@@ -69,7 +74,9 @@ std::vector<GpuInfo> FakeEngine::gpus() {
     size_t free_b = 0, total_b = 0;
     cudaSetDevice(i);
     cudaMemGetInfo(&free_b, &total_b);
-    out.push_back({i, prop.name, total_b, free_b});
+    char bus[32]{};
+    cudaDeviceGetPCIBusId(bus, sizeof(bus), i);
+    out.push_back({i, prop.name, total_b, free_b, bus});
   }
   if (out.empty()) out.push_back({0, "fake", 0, 0});
   return out;
@@ -77,6 +84,7 @@ std::vector<GpuInfo> FakeEngine::gpus() {
 
 ImageResult FakeEngine::generate_image(const ImageRequest& r, const ProgressFn& cb,
                                        const std::atomic<bool>* cancel) {
+  load_model("qwen-image-2.1", {}, {});
   MX_CHECK(r.width > 0 && r.height > 0 && r.width <= 8192 && r.height <= 8192, "圖片尺寸不合法");
   auto t0 = std::chrono::steady_clock::now();
   simulate(cb, cancel, r.steps);
@@ -103,6 +111,7 @@ ImageResult FakeEngine::generate_image(const ImageRequest& r, const ProgressFn& 
 
 VideoResult FakeEngine::generate_video(const VideoRequest& r, const ProgressFn& cb,
                                        const std::atomic<bool>* cancel) {
+  load_model("minimax-h3", {}, {});
   MX_CHECK(r.width > 0 && r.height > 0 && r.width <= 8192 && r.height <= 8192, "影片尺寸不合法");
   auto t0 = std::chrono::steady_clock::now();
   simulate(cb, cancel, r.steps);
@@ -114,17 +123,18 @@ VideoResult FakeEngine::generate_video(const VideoRequest& r, const ProgressFn& 
                                 std::chrono::steady_clock::now().time_since_epoch().count()) +
                ".mp4");
   std::wstring wpath = path.wstring();
+  const double duration = h3_align_frames(r.num_frames) / 24.0;
 #ifdef _WIN32
   std::wstring cmd = L"ffmpeg -y -loglevel error -f lavfi -i color=c=0x24483c:s=" +
                      std::to_wstring(r.width) + L"x" + std::to_wstring(r.height) +
-                     L":r=8:d=0.4 -f lavfi -i anullsrc=r=44100:cl=stereo -shortest "
+                     L":r=24:d=" + std::to_wstring(duration) + L" -f lavfi -i anullsrc=r=44100:cl=stereo -shortest "
                      L"-c:v libx264 -pix_fmt yuv420p -c:a aac \"" +
                      wpath + L"\" >NUL 2>&1";
   int rc = _wsystem(cmd.c_str());
 #else
   std::string cmd = "ffmpeg -y -loglevel error -f lavfi -i color=c=0x24483c:s=" +
                     std::to_string(r.width) + "x" + std::to_string(r.height) +
-                    ":r=8:d=0.4 -f lavfi -i anullsrc=r=44100:cl=stereo -shortest "
+                    ":r=24:d=" + std::to_string(duration) + " -f lavfi -i anullsrc=r=44100:cl=stereo -shortest "
                     "-c:v libx264 -pix_fmt yuv420p -c:a aac \"" +
                     path.string() + "\" >/dev/null 2>&1";
   int rc = std::system(cmd.c_str());

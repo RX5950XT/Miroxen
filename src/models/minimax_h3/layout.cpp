@@ -45,6 +45,7 @@ FrameGrid frame_grid(int64_t H, int64_t W) {
 
 int h3_align_frames(int f) {
   MX_CHECK(f >= 1, "影格數必須 >= 1");
+  f = std::max(f, 22);  // 5 幀只有 2 個 latent，解碼器需要至少 3 個；第一個有效組為 22。
   while (f % 17 != 5) f++;
   return f;
 }

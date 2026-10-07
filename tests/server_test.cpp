@@ -177,11 +177,15 @@ void test_meta_and_static(httplib::Client& cli) {
   check(sys["gpus"][0].contains("name") && sys["gpus"][0].contains("total") && sys["gpus"][0].contains("free"),
         "gpu 欄位");
   check(sys.contains("queue_length") && sys["queue_length"].is_number_integer(), "queue_length");
+  check(sys.contains("host") && sys.contains("process") && sys.contains("api"), "監控缺少主機、程序或 API 資料");
+  check(sys["api"]["requests"].is_number_unsigned() && sys["api"]["errors"].is_number_unsigned(), "API 計數型別");
+  for (auto& g : sys["gpus"]) check(g.contains("utilization_percent") && g.contains("temperature_c") && g.contains("power_w"), "GPU 監控欄位");
 
   auto loras = parse_body(cli.Get("/v1/loras"));
   check(loras["data"].size() == 1, "只該列出一筆 LoRA");
   check(loras["data"][0].value("name", "") == "good.safetensors", "LoRA 名稱");
   check(loras["data"][0].value("size", 0) > 0, "LoRA 大小");
+  check(loras["data"][0].value("model", "") == "unknown" && loras["data"][0].contains("warning"), "未知 LoRA 不能假裝相容");
 
   auto index = cli.Get("/");
   check(index && index->status == 200, "首頁狀態");
@@ -197,7 +201,38 @@ void test_meta_and_static(httplib::Client& cli) {
   check(slip && slip->status != 200, "/files/.. 不該回 200");
 }
 
+void test_model_control(httplib::Client& cli) {
+  auto network = parse_body(cli.Get("/v1/network"));
+  check(network["lan_enabled"] == false && network["urls"].empty(), "本機綁定不應公布 LAN 網址");
+  expect_code(cli.Post("/v1/models/load", "{", "application/json"), 400, "invalid_json");
+  expect_code(post_json(cli, "/v1/models/load", {{"model", "missing"}}), 400, "model_not_found");
+  expect_code(post_json(cli, "/v1/models/load", {{"model", "qwen-image-2.1"}, {"model_files", {{"dit", "../bad"}}}}), 400, "invalid_model_files");
+  expect_code(post_json(cli, "/v1/models/load", {{"model", "qwen-image-2.1"}, {"compute", "bad"}}), 400, "invalid_compute");
+  expect_code(cli.Post("/v1/models/unload", "{}", "text/plain"), 415, "unsupported_media_type");
+  auto unloaded = parse_body(post_json(cli, "/v1/models/unload", json::object()));
+  check(!unloaded["data"][0]["loaded"].get<bool>() && !unloaded["data"][1]["loaded"].get<bool>(), "卸載所有模型");
+  auto loaded = parse_body(post_json(cli, "/v1/models/load", {{"model", "qwen-image-2.1"}}));
+  check(loaded["data"][0]["loaded"].get<bool>() && !loaded["data"][1]["loaded"].get<bool>(), "手動載入圖片模型");
+  loaded = parse_body(post_json(cli, "/v1/models/load", {{"model", "minimax-h3"}}));
+  check(!loaded["data"][0]["loaded"].get<bool>() && loaded["data"][1]["loaded"].get<bool>(), "切換影音卸載圖片");
+  auto body = image_body(); body["type"] = "image"; body["steps"] = 200;
+  auto job = parse_body(post_json(cli, "/v1/jobs", body));
+  expect_code(post_json(cli, "/v1/models/unload", json::object()), 409, "model_busy");
+  expect_code(post_json(cli, "/v1/models/load", {{"model", "minimax-h3"}}), 409, "model_busy");
+  cli.Delete("/v1/jobs/" + job["id"].get<std::string>());
+  wait_until(cli, job["id"], 5000, terminal);
+  check(post_json(cli, "/v1/models/unload", json::object())->status == 200, "取消完成後可以卸載");
+}
+
 void test_validation(httplib::Client& cli) {
+  auto files = image_body();
+  files["model_files"] = {{"dit", "../test-Q8_0.gguf"}};
+  expect_code(post_json(cli, "/v1/images/generations", files), 400, "invalid_model_files");
+  files["model_files"] = {{"unsupported", "test-Q8_0.gguf"}};
+  expect_code(post_json(cli, "/v1/images/generations", files), 400, "invalid_model_files");
+  files["model_files"] = {{"dit", "test-Q4_K.gguf"}};
+  auto accepted = post_json(cli, "/v1/images/generations", files);
+  check(accepted && accepted->status == 200, "已安裝的模型檔應能送出");
   expect_code(cli.Post("/v1/images/generations", "{}", "application/json"), 400, "missing_model");
   expect_code(cli.Post("/v1/jobs", "{", "application/json"), 400, "invalid_json");
   auto bad_size = image_body();
@@ -251,6 +286,8 @@ void test_validation(httplib::Client& cli) {
   expect_code(post_json(cli, "/v1/images/generations", kind), 400, "model_kind");
   auto frames = json{{"type", "video"}, {"model", "minimax-h3"}, {"prompt", "海"},
                       {"size", "864x480"}, {"steps", 1}, {"num_frames", 4}};
+  expect_code(post_json(cli, "/v1/jobs", frames), 400, "invalid_steps");
+  frames["steps"] = 2;
   expect_code(post_json(cli, "/v1/jobs", frames), 400, "invalid_frames");
   frames["num_frames"] = 56;
   frames["size"] = "2048x1152";
@@ -395,6 +432,8 @@ void test_auth_and_limit(const TempTree& tree) {
   check(index && index->status == 200 && index->body.find("Miroxen") != std::string::npos, "靜態檔不需金鑰");
   expect_code(cli.Get("/v1/models"), 401, "unauthorized");
   expect_code(cli.Get("/v1/models", httplib::Headers{{"Authorization", "Bearer wrong"}}), 401, "unauthorized");
+  expect_code(post_json(cli, "/v1/models/unload", json::object()), 401, "unauthorized");
+  expect_code(post_json(cli, "/v1/models/load", {{"model", "qwen-image-2.1"}}), 401, "unauthorized");
   auto ok = cli.Get("/v1/models", httplib::Headers{{"Authorization", "Bearer secret"}});
   check(ok && ok->status == 200, "正確金鑰應通過");
   expect_code(post_json(cli, "/v1/jobs", image_body()), 401, "unauthorized");
@@ -416,6 +455,7 @@ void run_all() {
   TempTree tree;
   Running main_server(tree.opt("out"));
   test_meta_and_static(*main_server.cli);
+  test_model_control(*main_server.cli);
   test_validation(*main_server.cli);
   test_image_and_jobs(*main_server.cli);
   test_auth_and_limit(tree);

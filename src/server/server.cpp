@@ -4,6 +4,8 @@
 
 #include <chrono>
 #include <utility>
+#include <algorithm>
+#include "nlohmann/json.hpp"
 
 #include "core/common.h"
 
@@ -33,6 +35,11 @@ void guard(httplib::Response& res, Fn&& fn) {
   } catch (const std::exception& e) {
     write_error(res, 500, e.what(), "server_error", "internal");
   }
+}
+
+void require_json(const httplib::Request& req) {
+  if (!req.get_header_value("Content-Type").starts_with("application/json"))
+    throw ApiError(415, "invalid_request_error", "unsupported_media_type", "請使用 application/json");
 }
 
 bool authorized(const ServerOptions& opt, const httplib::Request& req) {
@@ -151,6 +158,8 @@ struct Server::Impl {
   std::mutex wait_mu;
   std::condition_variable wait_cv;
   bool finished = false;
+  std::atomic<uint64_t> requests{0}, errors{0};
+  std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 
   Impl(Engine& engine_in, ServerOptions opt_in) : engine(engine_in), opt(std::move(opt_in)) {}
 
@@ -172,7 +181,11 @@ struct Server::Impl {
 };
 
 void Server::Impl::install_hooks() {
-  svr.set_logger([](const httplib::Request& req, const httplib::Response& res) {
+  svr.set_logger([this](const httplib::Request& req, const httplib::Response& res) {
+    if (req.path.rfind("/v1/", 0) == 0) {
+      ++requests;
+      if (res.status >= 400) ++errors;
+    }
     MX_INFO("%s %s -> %d", req.method.c_str(), req.path.c_str(), res.status);
   });
   svr.set_error_handler([](const httplib::Request&, httplib::Response& res) {
@@ -222,8 +235,67 @@ void Server::Impl::route_meta() {
   svr.Get("/v1/models", [this](const httplib::Request&, httplib::Response& res) {
     guard(res, [&] { res.set_content(models_json(engine.models()), kJson); });
   });
+  svr.Post("/v1/models/load", [this](const httplib::Request& req, httplib::Response& res) {
+    guard(res, [&] {
+      require_json(req);
+      auto j = nlohmann::json::parse(req.body, nullptr, false);
+      if (!j.is_object()) throw ApiError(400, "invalid_request_error", "invalid_json", "本文必須是 JSON 物件");
+      for (const auto& [key, value] : j.items())
+        if (key != "model" && key != "model_files" && key != "compute")
+          throw ApiError(400, "invalid_request_error", "invalid_parameter", "只接受 model、model_files、compute");
+      j["prompt"] = "preload";
+      j["size"] = "256x256";
+      if (!j.contains("model") || !j["model"].is_string())
+        throw ApiError(400, "invalid_request_error", "missing_model", "需要 model");
+      std::string kind;
+      for (const auto& model : engine.models()) if (model.id == j["model"].get<std::string>()) kind = model.kind;
+      if (kind.empty()) throw ApiError(400, "invalid_request_error", "model_not_found", "找不到模型");
+      auto parsed = parse_request(opt, engine, j.dump(), kind);
+      const bool image = parsed->type == "image";
+      state->control_model(j["model"].get<std::string>(), image ? parsed->image.model_files : parsed->video.model_files,
+                           image ? parsed->image.compute : parsed->video.compute);
+      res.set_content(models_json(engine.models()), kJson);
+    });
+  });
+  svr.Post("/v1/models/unload", [this](const httplib::Request& req, httplib::Response& res) {
+    guard(res, [&] {
+      require_json(req);
+      auto j = nlohmann::json::parse(req.body, nullptr, false);
+      if (!j.is_object() || !j.empty()) throw ApiError(400, "invalid_request_error", "invalid_json", "卸載請求須為空物件 {}");
+      state->control_model("", {}, "");
+      res.set_content(models_json(engine.models()), kJson);
+    });
+  });
+  svr.Get("/v1/network", [this](const httplib::Request& req, httplib::Response& res) {
+    guard(res, [&] {
+      auto urls = nlohmann::json::array();
+      const bool lan = opt.host != "127.0.0.1" && opt.host != "localhost" && opt.host != "::1";
+      if (lan) {
+        char hostname[256]{};
+        addrinfo hints{}, *addresses = nullptr;
+        hints.ai_family = AF_INET;
+        if (gethostname(hostname, sizeof(hostname)) == 0 && getaddrinfo(hostname, nullptr, &hints, &addresses) == 0) {
+          for (auto* a = addresses; a; a = a->ai_next) {
+            char ip[INET_ADDRSTRLEN]{};
+            auto* addr = reinterpret_cast<sockaddr_in*>(a->ai_addr);
+            if (!inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip))) continue;
+            std::string value(ip);
+            if (value.starts_with("127.") || value.starts_with("169.254.")) continue;
+            if (opt.host != "0.0.0.0" && opt.host != "::" && opt.host != value) continue;
+            auto url = "http://" + value + ":" + std::to_string(req.local_port);
+            if (std::find(urls.begin(), urls.end(), url) == urls.end()) urls.push_back(url);
+          }
+          freeaddrinfo(addresses);
+        }
+      }
+      res.set_content(nlohmann::json{{"host", opt.host}, {"port", req.local_port}, {"lan_enabled", lan}, {"urls", urls}}.dump(), kJson);
+    });
+  });
   svr.Get("/v1/system", [this](const httplib::Request&, httplib::Response& res) {
-    guard(res, [&] { res.set_content(system_json(engine.gpus(), state->queue_length()), kJson); });
+    guard(res, [&] {
+      auto uptime = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+      res.set_content(system_json(engine.gpus(), state->queue_length(), requests, errors, uptime, !opt.api_key.empty()), kJson);
+    });
   });
   svr.Get("/v1/loras", [this](const httplib::Request&, httplib::Response& res) {
     guard(res, [&] { res.set_content(loras_json(opt), kJson); });

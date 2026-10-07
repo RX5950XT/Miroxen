@@ -38,6 +38,7 @@ struct Outcome {
   int64_t seed = 0;
   double seconds = 0;
   std::vector<uint8_t> png;
+  std::map<std::string, double> timings;
 };
 
 Outcome produce_image(ServerState& st, Job& job, const ProgressFn& cb) {
@@ -48,6 +49,7 @@ Outcome produce_image(ServerState& st, Job& job, const ProgressFn& cb) {
   out.url = "/files/" + name;
   out.seed = result.seed;
   out.seconds = result.seconds;
+  out.timings = std::move(result.timings);
   if (job.want_b64) out.png = std::move(result.png);
   return out;
 }
@@ -71,7 +73,7 @@ Outcome produce_video(ServerState& st, Job& job, const ProgressFn& cb) {
   auto dst = utf8_path(st.opt.out_dir) / name;
   std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing);
   remove_temp_source(src, dst);
-  return Outcome{"/files/" + name, result.seed, result.seconds, {}};
+  return Outcome{"/files/" + name, result.seed, result.seconds, {}, std::move(result.timings)};
 }
 
 void clear_temps(Job& job) {
@@ -95,6 +97,10 @@ ServerState::~ServerState() { shutdown(); }
 
 std::string ServerState::accept(const std::shared_ptr<Job>& job) {
   std::lock_guard lk(mu);
+  if (changing_model) {
+    clear_temps(*job);
+    throw ApiError(409, "conflict_error", "model_busy", "模型正在切換，請稍後再生成");
+  }
   job->id = "job_" + hex8(next_n++);
   job->status = "queued";
   job->created = unix_now();
@@ -153,6 +159,22 @@ int ServerState::queue_length() {
   return n;
 }
 
+void ServerState::control_model(const std::string& id, const std::map<std::string, std::string>& files, const std::string& compute) {
+  {
+    std::lock_guard lk(mu);
+    if (changing_model || std::any_of(all.begin(), all.end(), [](const auto& job) { return !job_terminal(job->status); }))
+      throw ApiError(409, "conflict_error", "model_busy", "生成或模型切換中，請等工作結束");
+    changing_model = true;
+  }
+  try {
+    if (id.empty()) engine.unload_models();
+    else engine.load_model(id, files, compute);
+  } catch (...) {
+    std::lock_guard lk(mu); changing_model = false; throw;
+  }
+  std::lock_guard lk(mu); changing_model = false;
+}
+
 void ServerState::prune_locked() {
   int finished = 0;
   for (auto& job : all)
@@ -182,6 +204,7 @@ void ServerState::execute(const std::shared_ptr<Job>& job) {
     job->url = std::move(out.url);
     job->seed = out.seed;
     job->seconds = out.seconds;
+    job->timings = std::move(out.timings);
     job->png = std::move(out.png);
     job->has_result = true;
     job->status = "succeeded";

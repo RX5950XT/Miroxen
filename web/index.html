@@ -1,146 +1,110 @@
 <!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Miroxen</title>
-  <link rel="stylesheet" href="/web/app.css">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Miroxen · 創作工作台</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/web/app.css">
 </head>
 <body>
+  <a class="skip-link" href="#prompt">跳到提示詞</a>
   <header class="topbar">
-    <div class="brand">Miroxen</div>
-    <div id="models" class="models" aria-label="模型狀態"></div>
-    <div class="top-meta">
-      <span id="queue" class="queue">佇列 0</span>
-      <div id="gpus" class="gpus" aria-label="顯示卡記憶體"></div>
-    </div>
+    <div class="brand">Miroxen<span class="brand-sub">本機影像工作台</span></div>
+    <nav class="views" aria-label="工作台分頁">
+      <button type="button" data-view="studio" aria-pressed="true">創作</button>
+      <button type="button" data-view="api-panel" aria-pressed="false">API／硬體</button>
+    </nav>
+    <div class="top-meta"><span id="connection" role="status">連線中</span><button type="button" id="model-toggle" popovertarget="model-manager" aria-label="模型狀態與管理"><span id="model-dot" class="dot"></span><span id="model-summary">模型狀態</span><span aria-hidden="true">▾</span></button><span id="queue" class="queue">佇列 —</span></div>
   </header>
-
-  <div class="layout">
+    <div id="model-manager" popover aria-labelledby="model-manager-title"><div class="section-heading"><h2 id="model-manager-title">模型管理</h2><button type="button" popovertarget="model-manager" popovertargetaction="hide" aria-label="關閉模型管理">關閉</button></div><p class="help">只保留一顆模型。切換會釋放上一顆；卸載可收回記憶體。生成中不能操作。量化與運算精度沿用創作分頁。</p><label class="field">模型<select id="manage-model"><option value="image">Qwen-Image-2.1 · 圖片</option><option value="video">MiniMax-H3 · 影音</option></select></label><div class="actions"><button id="load-model" type="button">載入／切換</button><button id="unload-model" type="button">卸載模型</button></div><p id="model-action-status" class="help" role="status"></p><div id="models" class="models"></div></div>
+  <div id="studio" class="layout">
     <form id="form" class="controls" novalidate>
-      <div class="modes" role="group" aria-label="模式">
-        <button type="button" id="mode-image" aria-pressed="true">圖像</button>
-        <button type="button" id="mode-video" aria-pressed="false">影片</button>
+      <div class="section-heading"><h1>建立作品</h1><span id="current-model" class="muted"></span></div>
+      <div class="modes" role="group" aria-label="生成模式">
+        <button type="button" id="mode-image" aria-pressed="true">圖片</button>
+        <button type="button" id="mode-video" aria-pressed="false">影音</button>
       </div>
-
-      <label class="field">提示詞
-        <textarea id="prompt" rows="5" maxlength="8000" placeholder="描述你要的畫面"></textarea>
+      <label class="field" id="image-task-wrap">圖片任務
+        <select id="image-task"><option value="generate">生成／編輯</option><option value="transparent">透明背景</option><option value="extract">擷取主體／去背</option><option value="mask">局部修改</option></select>
+        <span id="task-help" class="help">加入參考圖即可編輯；不加參考圖則生成新圖。</span>
       </label>
-
-      <details id="negative-wrap">
-        <summary>負向提示詞</summary>
-        <textarea id="negative" rows="2" maxlength="8000" placeholder="不想出現的內容"></textarea>
-      </details>
-
-      <fieldset>
-        <legend>尺寸</legend>
-        <div id="sizes" class="sizes" role="group" aria-label="尺寸"></div>
-        <p id="size-help" class="help" hidden></p>
-      </fieldset>
-
-      <div class="grid2">
-        <label class="field">步數
-          <input id="steps" type="number" min="1" max="200" value="40" inputmode="numeric">
-        </label>
-        <label class="field" id="cfg-wrap">CFG
-          <input id="cfg" type="number" min="0" max="20" step="0.1" value="1">
-        </label>
-        <label class="field" id="frames-wrap" hidden>幀數
-          <input id="frames" type="number" min="5" max="361" value="56" inputmode="numeric">
-        </label>
-        <label class="field" id="shift-wrap" hidden>影片 shift
-          <input id="video-shift" type="number" min="0.5" max="50" step="0.5" value="12" aria-describedby="shift-help">
-          <span id="shift-help" class="help">官方 12；LightX2V 8 步加速 LoRA 用 6。</span>
-        </label>
-        <label class="field seed-field">種子
-          <span class="seed-row">
-            <input id="seed" type="number" value="-1" inputmode="numeric">
-            <button type="button" id="randomize">隨機</button>
-          </span>
-        </label>
-        <label class="field wide">運算精度
-          <select id="compute" aria-describedby="compute-help">
-            <option value="">伺服器預設</option>
-            <option value="bf16">bf16（最準）</option>
-            <option value="fp8">fp8（約快 2 倍）</option>
-            <option value="fp4">fp4（最快）</option>
-          </select>
-          <span id="compute-help" class="help">fp8／fp4 需要 RTX 50 系列；切換時會重新載入模型。</span>
-        </label>
-      </div>
-
-      <details id="sched-wrap">
-        <summary>取樣排程（進階）</summary>
-        <label class="field">自訂 sigma 節點
-          <input id="sigmas" type="text" inputmode="decimal" placeholder="例如 1, 0.9375, 0.875, 0.75, 0.5, 0.25"
-                 aria-describedby="sigmas-help">
-          <span id="sigmas-help" class="help">留空用預設排程。填了以後步數＝節點數；Viggle 6 步加速 LoRA 用上面的例子並取消下面的勾選。</span>
-        </label>
-        <label class="check">
-          <input id="shift-terminal" type="checkbox" checked>
-          尾端拉伸到 0.02（官方預設；步數蒸餾 LoRA 要關掉）
-        </label>
-      </details>
-
-      <div id="frame-files" class="frame-files" hidden>
-        <label class="field">首幀
-          <input id="first-frame" type="file" accept="image/png,image/jpeg">
-        </label>
-        <label class="field">尾幀
-          <input id="last-frame" type="file" accept="image/png,image/jpeg">
-        </label>
-      </div>
-
-      <section class="loras" aria-label="LoRA">
-        <h2>LoRA</h2>
-        <div id="loras"></div>
-      </section>
-
-      <div id="refs-wrap">
-        <div class="drop" id="drop">
-          <label>
-            <input id="ref-input" class="file-input" type="file" accept="image/png,image/jpeg" multiple>
-            拖放參考圖，或按一下選擇（PNG、JPEG，最多 10 張）
-          </label>
-        </div>
+      <label class="field">提示詞 <textarea id="prompt" rows="5" maxlength="8000" placeholder="描述主體、動作、場景與光線"></textarea></label>
+      <p class="help compact">Ctrl + Enter 生成。透明背景與去背會自動加入任務提示。</p>
+      <section id="refs-wrap" class="input-section">
+        <h2>參考圖片 <span id="refs-count" class="muted">0 / 10</span></h2>
+        <div class="drop" id="drop"><label><input id="ref-input" class="file-input" type="file" accept="image/png,image/jpeg" multiple>拖放圖片，或按一下選擇 PNG／JPEG</label></div>
         <ul id="ref-list" class="ref-list"></ul>
-      </div>
-
-      <div id="vrefs-wrap" hidden>
-        <div class="drop" id="vdrop">
-          <label>
-            <input id="vref-input" class="file-input" type="file" accept="image/png,image/jpeg,video/*,audio/*" multiple>
-            參考生成：拖放圖片、影片或音訊（依序，最多 12 個）
-          </label>
+        <p id="mask-help" class="help" hidden>第一張是原圖，第二張是黑底白色的遮罩圖；提示詞描述白色區域要改什麼。這是模型理解遮罩，不保證外部像素完全不變。</p>
+      </section>
+      <section id="video-inputs" class="input-section" hidden>
+        <label class="field">影音任務<select id="video-task"><option value="first_last">文字／首尾幀生成</option><option value="reference">參考素材生成</option></select></label>
+        <div id="frame-files" class="frame-files">
+          <label class="field">首幀（選填）<input id="first-frame" type="file" accept="image/png,image/jpeg"></label>
+          <label class="field">尾幀（選填）<input id="last-frame" type="file" accept="image/png,image/jpeg"></label>
+          <button id="clear-frames" type="button">清除首尾幀</button>
         </div>
-        <p class="help">提示詞裡用清單上的標籤指稱，例如「&lt;Picture 1&gt; 的狗在海邊跑」。不能和首尾幀同時使用；影片自帶的音軌也會一起參考。</p>
-        <ul id="vref-list" class="ref-list"></ul>
+        <div id="vrefs-wrap" hidden>
+          <div class="drop" id="vdrop"><label><input id="vref-input" class="file-input" type="file" accept="image/png,image/jpeg,video/*,audio/*" multiple>加入圖片、影片或音訊參考</label></div>
+          <p class="help">最多 12 個：圖 9、影片 3、音訊 3。提示詞使用清單上的標籤；音訊需搭配圖或影片。</p>
+          <ul id="vref-list" class="ref-list"></ul>
+          <details><summary>參考素材設定</summary>
+            <label class="field">參考圖短邊（像素）<input id="ref-edge" type="number" min="256" max="4096" step="32" value="2048"><span class="help">較小會省時間與顯存，2048 為官方預設。</span></label>
+            <label class="check"><input id="ref-native" type="checkbox">參考影片使用官方 768p 畫布（較吃顯存）</label>
+          </details>
+        </div>
+      </section>
+      <fieldset class="input-section"><legend>輸出尺寸</legend><div id="sizes" class="sizes" role="group" aria-label="輸出尺寸"></div>
+        <div id="custom-size" class="grid2" hidden>
+          <label class="field">寬度<input id="width" type="number" min="256" max="2752" step="32" value="1024"></label>
+          <label class="field">高度<input id="height" type="number" min="256" max="2752" step="32" value="1024"></label>
+        </div><p id="size-help" class="help compact"></p>
+      </fieldset>
+      <div id="frames-wrap" class="input-section" hidden>
+        <div class="grid2"><label class="field">目標秒數<input id="duration" type="number" min="0.2" max="15" step="0.1" value="2.3"></label>
+        <label class="field">目標幀數<input id="frames" type="number" min="5" max="361" value="56"></label></div>
+        <p id="duration-help" class="help"></p>
       </div>
-
-      <p id="form-error" class="error" role="alert" hidden></p>
-      <div class="actions">
-        <button type="submit" id="generate" class="primary">生成</button>
-        <button type="button" id="cancel" hidden>取消</button>
-      </div>
-      <div id="meter" class="meter" hidden><span id="meter-bar"></span></div>
-      <p id="status" class="status" aria-live="polite"></p>
+      <section class="loras input-section" aria-label="LoRA"><div class="section-heading"><h2>LoRA</h2><button type="button" id="reload-loras">重新掃描</button></div>
+        <p class="help compact">勾選加速 LoRA 會套用對應排程；畫風可另疊加。強度 1 為原始設定。</p>
+        <div id="loras"></div><p id="lora-help" class="help compact" role="status"></p>
+      </section>
+      <details class="input-section" open><summary>生成設定</summary>
+        <div class="grid2">
+          <label class="field">取樣步數<input id="steps" type="number" min="1" max="200" value="40"><span id="steps-help" class="help"></span></label>
+          <label class="field" id="cfg-wrap">提示詞引導（CFG）<input id="cfg" type="number" min="0" max="20" step="0.1" value="1"></label>
+          <label class="field seed-field">種子<span class="seed-row"><input id="seed" type="text" value="-1" inputmode="numeric"><button type="button" id="randomize">隨機</button></span><span class="help">-1 隨機；相同種子有助比較設定。</span></label>
+          <label class="field wide">運算精度<select id="compute"><option value="">伺服器預設</option><option value="bf16">BF16 · 精度優先</option><option value="fp8">FP8 · 速度與精度平衡</option><option value="fp4">FP4 · 速度優先</option></select><span class="help">FP8／FP4 需 Blackwell 顯卡；不支援時退回 BF16。切換會重新載入模型。</span></label>
+        </div>
+        <details id="negative-wrap"><summary>負向提示詞</summary><textarea id="negative" rows="2" maxlength="8000" aria-label="負向提示詞" placeholder="不想出現的內容（CFG 大於 1 才生效）"></textarea></details>
+        <label class="field" id="shift-wrap" hidden>影片 shift<input id="video-shift" type="number" min="0.5" max="50" step="0.5" value="12"><span class="help">原版與 Ref2VA 8 步用 12；FL2VA 768p 加速用 6。</span></label>
+        <details id="sched-wrap"><summary>圖片取樣排程</summary><label class="field">自訂 sigma 節點<input id="sigmas" type="text" placeholder="留空使用預設排程"><span class="help">填入後以節點數當步數；更換加速 LoRA 會重新套用。</span></label><label class="check"><input id="shift-terminal" type="checkbox" checked>尾端拉伸至 0.02（原版設定）</label></details>
+      </details>
+      <details class="input-section"><summary>模型檔與量化版本</summary><p class="help">只列已安裝檔案；更換會重新載入。檔案量化與上方運算精度是不同設定。</p><div id="model-files"></div></details>
+      <div class="run-actions"><p id="form-error" class="error" role="alert" hidden></p><div class="actions"><button type="submit" id="generate" class="primary">生成</button><button type="button" id="cancel" hidden>取消</button></div><div id="meter" class="meter" hidden><span id="meter-bar"></span></div><p id="status" class="status" aria-live="polite"></p></div>
     </form>
-
-    <main>
-      <section class="viewer" aria-label="結果">
-        <p id="empty" class="empty">寫下提示詞，按「生成」。圖像或影片會顯示在這裡。</p>
-        <div id="skeleton" class="skeleton" hidden></div>
-        <img id="result-img" alt="" hidden>
-        <video id="result-video" controls hidden></video>
-        <p id="viewer-error" class="error" role="alert" hidden></p>
-        <p id="caption" class="caption" hidden></p>
-      </section>
-      <section aria-label="近期結果">
-        <h2 class="history-title">近期結果</h2>
-        <div id="history" class="history"></div>
-      </section>
+    <main class="results">
+      <div class="section-heading"><h2>生成結果</h2><a id="download" class="button-link" hidden download>下載作品</a></div>
+      <section class="viewer" aria-label="生成結果"><p id="empty" class="empty">你的下一個畫面，從這裡開始。<span>左側設定內容，生成後在這裡預覽。</span></p><div id="skeleton" class="skeleton" hidden></div><img id="result-img" alt="" hidden><video id="result-video" controls hidden></video><p id="viewer-error" class="error" role="alert" hidden></p></section>
+      <p id="caption" class="caption" hidden></p>
+      <section aria-label="近期結果"><div class="section-heading history-title"><h2>近期作品</h2><span class="muted">保留本次服務的最近 50 筆</span></div><div id="history" class="history"></div></section>
     </main>
   </div>
-  <script src="/web/app.js"></script>
+  <main id="api-panel" class="utility-page" hidden>
+    <div class="section-heading"><h1>API 與硬體監控</h1><span id="api-state" class="muted">等待資料</span></div>
+    <div class="utility-columns"><div class="api-column">
+    <div id="api-metrics" class="host-metrics"></div>
+    <section class="api-section"><h2>API 連線</h2><div class="address-row"><a id="api-base" class="mono"></a><button type="button" id="copy-api-base">複製 API</button></div><p class="help compact">Base URL 可直接複製；點網址查看模型清單。</p><p id="network-state" class="help"></p><p id="address-copy-status" class="help compact" role="status"></p><ul id="network-urls" class="network-urls"></ul><form id="api-connection"><label class="field">API 金鑰（僅保留於目前頁面）<input id="api-key" type="password" autocomplete="off" placeholder="服務未設金鑰時留空"></label><button id="connect-api" type="button">測試連線</button></form><p id="api-error" class="error" role="status"></p></section>
+
+    <section class="api-section" id="lan-help"><h2>其他區網電腦怎麼用？</h2><ol class="setup-steps"><li>兩台電腦連到同一個路由器／Wi-Fi。這台電腦需保持 Miroxen 執行。</li><li>在另一台電腦的瀏覽器開啟上方的「工作台」網址，就能直接生成，不必安裝模型。</li><li>若使用其他程式，將 API Base URL 填成 <code id="lan-api-example"></code>；服務有設金鑰時，填相同的 API key。</li></ol><p class="help">圖片程式需支援 OpenAI 圖片生成端點。一般聊天介面無法把本服務當成聊天模型；影音使用 Miroxen 的工作 API。</p><details><summary>連不上或要用程式呼叫？</summary><p class="help">不要填 127.0.0.1 或 localhost，這兩個只會連到對方自己的電腦。多張網卡時，選與對方同網段的網址；VPN 網址需雙方都連上該 VPN。</p><p class="help">先開 <a id="lan-health-link">/health</a>，看到 status: ok 表示通了。若連不上，檢查 Windows 防火牆是否允許這台電腦的 TCP 8188 入站，以及路由器是否隔離裝置。防火牆設定需要管理員權限。</p><p class="help">POST 圖片生成至 <code>/v1/images/generations</code>（model: qwen-image-2.1）；POST 影音或非同步工作至 <code>/v1/jobs</code>。JSON 範例在下方，Content-Type 使用 application/json；有金鑰時加 Authorization: Bearer &lt;API key&gt;。</p></details></section>
+    <details class="api-section" id="request-section"><summary>目前生成請求</summary><div class="section-heading"><h2>JSON</h2><button id="copy-request" type="button">複製 JSON</button></div><p class="help">依創作分頁的設定產生。複製時包含上傳素材的 base64；預覽省略素材內容。</p><pre id="request-preview" tabindex="0"></pre><p id="copy-status" class="help" role="status"></p></details>
+    <details class="api-section"><summary>API 端點</summary><dl class="endpoints"><dt>GET /health</dt><dd>服務存活</dd><dt>GET /v1/models</dt><dd>模型狀態與可選檔案</dd><dt>POST /v1/models/load</dt><dd>載入／切換模型</dd><dt>POST /v1/models/unload</dt><dd>卸載模型</dd><dt>GET /v1/network</dt><dd>區域網路連線網址</dd><dt>GET /v1/system</dt><dd>硬體與 API 統計</dd><dt>GET /v1/loras</dt><dd>LoRA、用途與建議設定</dd><dt>POST /v1/jobs</dt><dd>建立圖片／影音工作</dd><dt>POST /v1/images/generations</dt><dd>圖片生成，等待結果</dd><dt>POST /v1/videos/generations</dt><dd>影音生成，回傳工作</dd><dt>GET /v1/jobs</dt><dd>最近 50 筆工作</dd><dt>GET /v1/jobs/{id}</dt><dd>單筆工作狀態</dd><dt>GET /v1/jobs/{id}/events</dt><dd>生成進度（SSE）</dd><dt>DELETE /v1/jobs/{id}</dt><dd>取消工作</dd></dl></details>
+    </div><div class="hardware-column">
+  <section id="monitor" class="api-section">
+    <div class="section-heading"><h2>硬體監控</h2><span id="sample-time" class="muted">等待資料</span></div>
+    <p class="help">CPU、RAM 與 GPU 是整台電腦的用量，包含其他程式；Miroxen RAM 另列。每 3 秒更新，切到背景時暫停。</p>
+    <div id="host-metrics" class="host-metrics"></div><div id="gpus" class="gpus"></div><p id="monitor-error" class="error" role="status"></p>
+  </section>
+
+    </div></div>
+  </main>
+  <script src="/web/controls.js"></script><script src="/web/app.js"></script>
 </body>
 </html>

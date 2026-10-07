@@ -5,6 +5,8 @@
 #include <filesystem>
 
 #include "core/common.h"
+#include "core/model_file.h"
+#include "models/minimax_h3/pipeline.h"
 #include "server/image_io.h"
 
 #include "nlohmann/json.hpp"
@@ -142,21 +144,35 @@ std::string job_type(const json& j, const std::string& forced) {
   return t;
 }
 
-void check_model(Engine& engine, const json& j, const std::string& type) {
+std::map<std::string, std::string> check_model(Engine& engine, const json& j, const std::string& type) {
   if (!j.contains("model") || !j["model"].is_string() || trim(j["model"].get<std::string>()).empty())
     throw ApiError(400, "invalid_request_error", "missing_model", "需要 model");
   auto id = trim(j["model"].get<std::string>());
   bool matched = false;
   std::string kind;
+  ModelInfo model;
   for (const auto& m : engine.models()) {
     if (m.id != id) continue;
     matched = true;
     kind = m.kind;
+    model = m;
     break;
   }
   if (!matched) throw ApiError(400, "invalid_request_error", "model_not_found", "找不到模型");
   if (kind != type) throw ApiError(400, "invalid_request_error", "model_kind", "模型種類與此請求不符");
   // 引擎按需載入模型（第一次請求會回報 "load" 階段），所以不檢查 loaded。
+  std::map<std::string, std::string> selected;
+  if (!j.contains("model_files")) return selected;
+  if (!j["model_files"].is_object())
+    throw ApiError(400, "invalid_request_error", "invalid_model_files", "model_files 必須是物件");
+  for (const auto& [role, value] : j["model_files"].items()) {
+    auto it = model.files.find(role);
+    if (!value.is_string() || it == model.files.end() ||
+        std::find(it->second.begin(), it->second.end(), value.get<std::string>()) == it->second.end())
+      throw ApiError(400, "invalid_request_error", "invalid_model_files", "只能選擇 /v1/models 列出的模型檔");
+    selected[role] = value.get<std::string>();
+  }
+  return selected;
 }
 
 std::vector<LoraSpec> read_loras(const ServerOptions& opt, const json& j) {
@@ -337,13 +353,23 @@ json job_value(const Job& job) {
             {"prompt", job.prompt},
             {"progress", {{"stage", job.stage}, {"step", job.step}, {"total", job.total}}}};
   if (job.has_result)
-    j["result"] = {{"url", job.url}, {"seed", job.seed}, {"seconds", job.seconds}};
+    j["result"] = {{"url", job.url}, {"seed", job.seed}, {"seconds", job.seconds}, {"timings", job.timings}};
   else
     j["result"] = nullptr;
   if (!job.err_message.empty())
     j["error"] = {{"message", job.err_message}, {"type", job.err_type}, {"code", job.err_code}};
   else
     j["error"] = nullptr;
+  const bool video = job.type == "video";
+  const int frames = video ? h3_align_frames(job.video.num_frames) : 0;
+  const auto& loras = video ? job.video.loras : job.image.loras;
+  json ls = json::array();
+  for (const auto& l : loras) ls.push_back({{"name", path_utf8(utf8_path(l.path).filename())}, {"scale", l.scale}});
+  j["parameters"] = {{"width", video ? job.video.width : job.image.width},
+                       {"height", video ? job.video.height : job.image.height},
+                       {"steps", video ? job.video.steps : int(job.image.sigmas.empty() ? job.image.steps : job.image.sigmas.size())},
+                       {"compute", video ? job.video.compute : job.image.compute}, {"loras", ls}};
+  if (video) { j["parameters"]["num_frames"] = frames; j["parameters"]["fps"] = 24; j["parameters"]["duration_seconds"] = frames / 24.0; }
   return j;
 }
 
@@ -352,14 +378,15 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
   json j = json::parse(body);
   if (!j.is_object()) throw ApiError(400, "invalid_request_error", "invalid_json", "本文必須是 JSON 物件");
   auto type = job_type(j, forced);
-  check_model(engine, j, type);
+  auto model_files = check_model(engine, j, type);
   if (j.contains("n")) {
     int n = read_int(j, "n", 1);
     if (n != 1) throw ApiError(400, "invalid_request_error", "invalid_n", "n 必須是 1");
   }
   int steps = read_int(j, "steps", type == "video" ? 30 : 40);
-  if (steps < 1 || steps > 200)
-    throw ApiError(400, "invalid_request_error", "invalid_steps", "steps 必須介於 1 與 200");
+  int min_steps = type == "video" ? 2 : 1;
+  if (steps < min_steps || steps > 200)
+    throw ApiError(400, "invalid_request_error", "invalid_steps", "steps 必須介於 " + std::to_string(min_steps) + " 與 200");
   float cfg = 1.f;
   read_cfg(j, cfg);
   int64_t seed = -1;
@@ -390,6 +417,7 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
     job->image.seed = seed;
     job->image.loras = std::move(loras);
     job->image.compute = compute;
+    job->image.model_files = model_files;
     if (j.contains("shift_terminal")) {
       if (!j["shift_terminal"].is_boolean())
         throw ApiError(400, "invalid_request_error", "invalid_type", "shift_terminal 必須是布林值");
@@ -419,6 +447,7 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
     job->video.seed = seed;
     job->video.loras = std::move(loras);
     job->video.compute = compute;
+    job->video.model_files = model_files;
     read_one_upload(opt, j, "first_frame", job->video.first_frame, guard);
     read_one_upload(opt, j, "last_frame", job->video.last_frame, guard);
     read_references(opt, j, job->video.references, guard);
@@ -477,7 +506,8 @@ std::string models_json(const std::vector<ModelInfo>& models) {
                     {"owned_by", "miroxen"},
                     {"kind", m.kind},
                     {"loaded", m.loaded},
-                    {"detail", m.detail}});
+                    {"detail", m.detail}, {"files", m.files}, {"defaults", m.defaults},
+                    {"active_files", m.active_files}, {"default_compute", m.compute}});
   }
   return json{{"object", "list"}, {"data", std::move(data)}}.dump();
 }
@@ -495,7 +525,31 @@ std::string loras_json(const ServerOptions& opt) {
       std::error_code fec;
       auto sz = ent.file_size(fec);
       if (fec) continue;
-      rows.push_back({{"name", name}, {"size", sz}});
+      json row = {{"name", name}, {"size", sz}, {"model", "unknown"}, {"purpose", "unknown"}, {"preset", nullptr}};
+      std::string lower = name;
+      std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+      if (lower.find("minimax_h3") != std::string::npos) row["model"] = "minimax-h3";
+      if (lower.find("qwen") != std::string::npos || lower == "turbo8_lora_step2500.safetensors" || lower == "zzz_chibi_v2_st2500.safetensors") row["model"] = "qwen-image-2.1";
+      const bool viggle = name == "Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r256.safetensors";
+      if (viggle) row["preset"] = {{"steps", 6}, {"sigmas", {1., .9375, .875, .75, .5, .25}}, {"shift_terminal", false}, {"cfg_scale", 1}};
+      if (lower == "turbo8_lora_step2500.safetensors") row["preset"] = {{"steps", 8}, {"shift_terminal", false}, {"cfg_scale", 1}};
+      if (lower == "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors") row["preset"] = {{"steps", 9}, {"video_shift", 6}};
+      if (lower == "minimax_h3_fl2v_turbo_4step_v1.2_768p_bf16.safetensors") row["preset"] = {{"steps", 5}, {"video_shift", 6}};
+      if (lower == "minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors") row["preset"] = {{"steps", 9}, {"video_shift", 12}};
+      if (!row["preset"].is_null()) row["purpose"] = "acceleration";
+      if (lower == "zzz_chibi_v2_st2500.safetensors") row["purpose"] = "style";
+      row["task"] = lower.find("_ref2v_") != std::string::npos ? "reference" : lower.find("_fl2v_") != std::string::npos ? "first_last" : "any";
+      if (row["model"] == "unknown") {
+        try {
+          TensorStore store;
+          store.add_file(path_utf8(ent.path()));
+          for (const auto& key : store.names()) {
+            if (key.find("transformer_blocks.") != std::string::npos) { row["model"] = "qwen-image-2.1"; break; }
+            if (key.starts_with("blocks.") || key.find("token_refiner.") != std::string::npos) { row["model"] = "minimax-h3"; break; }
+          }
+        } catch (const std::exception&) { row["warning"] = "無法識別模型，使用前請確認檔案相容性"; }
+      }
+      rows.push_back(std::move(row));
     }
     std::sort(rows.begin(), rows.end(), [](const json& a, const json& b) {
       return a["name"].get<std::string>() < b["name"].get<std::string>();
@@ -503,13 +557,6 @@ std::string loras_json(const ServerOptions& opt) {
     for (auto& row : rows) data.push_back(std::move(row));
   }
   return json{{"data", std::move(data)}}.dump();
-}
-
-std::string system_json(const std::vector<GpuInfo>& gpus, int queue_length) {
-  json arr = json::array();
-  for (auto& g : gpus)
-    arr.push_back({{"index", g.index}, {"name", g.name}, {"total", g.total}, {"free", g.free}});
-  return json{{"gpus", std::move(arr)}, {"queue_length", queue_length}}.dump();
 }
 
 std::shared_ptr<Job> parse_request(const ServerOptions& opt, Engine& engine, const std::string& body,

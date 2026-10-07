@@ -10,12 +10,15 @@ const IMAGE_SIZES = [
   ["16:9", 2752, 1536],
   ["9:16", 1536, 2752],
   ["依參考圖比例", 0, 0],
+  ["自訂", -1, -1],
 ];
 const VIDEO_SIZES = [
   ["864×480", 864, 480],
   ["1344×768（官方）", 1344, 768],
   ["480×864", 480, 864],
+  ["736×1312 · 直式", 736, 1312],
   ["自動", 0, 0],
+  ["自訂", -1, -1],
 ];
 const STEP_DEFAULT = { image: 40, video: 30 };
 const STATUS_TEXT = {
@@ -25,7 +28,7 @@ const STATUS_TEXT = {
   failed: "失敗",
   cancelled: "已取消",
 };
-const STAGE_TEXT = { encode: "編碼", denoise: "去噪", decode: "解碼" };
+const STAGE_TEXT = { load: "載入模型", encode: "準備素材", denoise: "取樣", decode: "輸出作品", decode_audio: "輸出音訊", decode_video: "輸出影片", done: "完成" };
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -41,16 +44,12 @@ const state = {
   source: null,
   settled: false,
   histSig: "",
+  loraRows: [], loraSelections: {}, fileSelections: { image: {}, video: {} },
+  fileSignature: "", apiKey: "", pollTimer: null, refreshing: false, submitting: false, authRequired: false, modelChanging: false,
 };
 
 function sizes() {
   return state.mode === "video" ? VIDEO_SIZES : IMAGE_SIZES;
-}
-
-function selectedSize() {
-  const list = sizes();
-  const item = list[Math.min(state.size, list.length - 1)];
-  return { label: item[0], w: item[1], h: item[2] };
 }
 
 function isTerminal(status) {
@@ -64,7 +63,9 @@ function showFormError(message) {
 }
 
 async function api(path, opts) {
-  const res = await fetch(path, Object.assign({ cache: "no-store" }, opts));
+  const headers = Object.assign({}, opts?.headers);
+  if (state.apiKey) headers.Authorization = "Bearer " + state.apiKey;
+  const res = await fetch(path, Object.assign({ cache: "no-store", signal: AbortSignal.timeout(opts?.timeout || 15000) }, opts, { headers }));
   const text = await res.text();
   let data = null;
   if (text) {
@@ -76,7 +77,9 @@ async function api(path, opts) {
   }
   if (!res.ok) {
     const msg = data && data.error && data.error.message ? data.error.message : "請求失敗（" + res.status + "）";
-    throw new Error(msg);
+    const error = new Error(msg);
+    error.status = res.status;
+    throw error;
   }
   return data;
 }
@@ -96,29 +99,6 @@ function modelId(kind) {
   return (loaded || list[0] || {}).id || "";
 }
 
-function renderSizes() {
-  const box = $("sizes");
-  box.replaceChildren();
-  sizes().forEach((item, i) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = item[0];
-    button.setAttribute("aria-pressed", i === state.size ? "true" : "false");
-    button.addEventListener("click", () => {
-      state.size = i;
-      renderSizes();
-      const s = selectedSize();
-      if (s.w) $("skeleton").style.aspectRatio = s.w + " / " + s.h;
-    });
-    box.append(button);
-  });
-  const s = selectedSize(), help = $("size-help");
-  help.hidden = s.w !== 0;
-  help.textContent = state.mode === "image"
-    ? "依最後一張參考圖的比例，約 1024×1024 像素。"
-    : "有首幀時依首幀比例、否則 16:9，短邊 768（官方畫布，較慢）。";
-}
-
 // 參考生成（Ref2VA）：依序的圖片／影片／音訊，標籤依種類各自編號（同提示詞裡的寫法）。
 const VREF_TAG = { image: "Picture", video: "Video", audio: "Audio" };
 const VREF_LIMIT = { image: 9, video: 3, audio: 3 };
@@ -132,6 +112,7 @@ function vrefKind(file) {
 }
 
 function renderVrefs() {
+  updateRequestPreview();
   const list = $("vref-list");
   list.replaceChildren();
   const count = { image: 0, video: 0, audio: 0 };
@@ -171,7 +152,8 @@ async function addVrefs(fileList) {
       showFormError(VREF_TAG[kind] + " 參考最多 " + VREF_LIMIT[kind] + " 個");
       continue;
     }
-    state.vrefs.push({ kind, name: file.name, url: await readFile(file) });
+    try { state.vrefs.push({ kind, name: file.name, url: await readFile(file) }); }
+    catch (e) { showFormError(e.message); }
   }
   renderVrefs();
 }
@@ -188,6 +170,8 @@ function applyMode() {
   $("shift-wrap").hidden = image;
   $("sched-wrap").hidden = !image;
   $("vrefs-wrap").hidden = image;
+  renderModelFiles();
+  updateTasks();
   renderSizes();
   const s = selectedSize();
   $("skeleton").style.aspectRatio = s.w + " / " + s.h;
@@ -198,13 +182,18 @@ function setMode(mode) {
   const steps = Number($("steps").value);
   if (steps === STEP_DEFAULT[state.mode]) $("steps").value = String(STEP_DEFAULT[mode]);
   state.mode = mode;
+  clearAcceleration();
   state.size = 0;
+  $("width").max = $("height").max = mode === "image" ? "2752" : "1920";
+  $("width").value = mode === "image" ? "1024" : "736";
+  $("height").value = mode === "image" ? "1024" : "1312";
   applyMode();
+  updateRequestPreview();
 }
 
 function setBusy(busy) {
   $("cancel").hidden = !busy;
-  const fields = $("form").querySelectorAll("input, textarea, button");
+  const fields = $("form").querySelectorAll("input, textarea, select, button");
   fields.forEach((el) => {
     if (el.id === "cancel" || el.id === "generate") return;
     el.disabled = busy;
@@ -218,7 +207,7 @@ function updateRun(job) {
   const bar = $("meter-bar");
   status.classList.remove("warn");
   if (!job || isTerminal(job.status)) {
-    setBusy(false);
+    setBusy(state.modelChanging);
     button.textContent = "生成";
     meter.hidden = true;
     bar.style.width = "0%";
@@ -245,6 +234,7 @@ function updateRun(job) {
 }
 
 function clearViewer() {
+  $("download").hidden = true;
   $("result-img").hidden = true;
   const video = $("result-video");
   video.pause();
@@ -284,6 +274,9 @@ function showJob(job) {
   clearViewer();
   $("empty").hidden = true;
   const url = job.result.url;
+  $("download").href = url;
+  $("download").download = job.id + (job.type === "video" ? ".mp4" : ".png");
+  $("download").hidden = false;
   if (job.type === "video") {
     const video = $("result-video");
     video.src = url;
@@ -297,7 +290,10 @@ function showJob(job) {
   const cap = $("caption");
   const sec = job.result.seconds;
   let text = "種子 " + job.result.seed;
-  if (typeof sec === "number") text += " · " + sec.toFixed(1) + " 秒";
+  if (typeof sec === "number") text += " · 生成耗時 " + sec.toFixed(1) + " 秒";
+  const params = job.parameters || {};
+  if (params.width && params.height) text += " · " + params.width + "×" + params.height;
+  if (params.duration_seconds) text += " · 影片 " + params.duration_seconds.toFixed(2) + " 秒 / 24 fps";
   cap.textContent = text;
   cap.hidden = false;
 }
@@ -311,6 +307,8 @@ function onJob(job) {
 }
 
 function closeSource() {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  state.pollTimer = null;
   if (!state.source) return;
   state.source.close();
   state.source = null;
@@ -319,6 +317,7 @@ function closeSource() {
 function watch(id) {
   closeSource();
   state.settled = false;
+  if (state.apiKey) return pollWatch(id);
   const es = new EventSource("/v1/jobs/" + encodeURIComponent(id) + "/events");
   state.source = es;
   es.onmessage = (ev) => {
@@ -336,15 +335,10 @@ function watch(id) {
       refreshMeta();
     }
   };
-  es.onerror = async () => {
+  es.onerror = () => {
     es.close();
     if (state.source === es) state.source = null;
-    if (state.settled) return;
-    try {
-      onJob(await api("/v1/jobs/" + encodeURIComponent(id)));
-    } catch (e) {
-      showFormError(e.message);
-    }
+    if (!state.settled) pollWatch(id);
   };
 }
 
@@ -400,7 +394,9 @@ function renderHistory() {
 }
 
 function renderModels(data) {
+  const previous = state.models.map((m) => m.id).join();
   state.models = (data && data.data) || [];
+  if (previous !== state.models.map((m) => m.id).join()) renderLoras(state.loraRows);
   const box = $("models");
   box.replaceChildren();
   state.models.forEach((m) => {
@@ -409,94 +405,72 @@ function renderModels(data) {
     const dot = document.createElement("span");
     dot.className = "dot" + (m.loaded ? " on" : "");
     const name = document.createElement("span");
-    name.textContent = m.id;
-    el.append(dot, name);
+    name.textContent = m.id + (m.loaded ? " · 已載入" : " · 按需載入");
+    const detail = document.createElement("span");
+    detail.className = "model-detail";
+    detail.textContent = m.detail;
+    el.append(dot, name, detail);
     box.append(el);
   });
-}
-
-function renderSystem(data) {
-  $("queue").textContent = "佇列 " + ((data && data.queue_length) || 0);
-  const box = $("gpus");
-  box.replaceChildren();
-  (data.gpus || []).forEach((g) => {
-    const row = document.createElement("div");
-    row.className = "gpu";
-    const label = document.createElement("span");
-    label.className = "gpu-label";
-    const name = g.name || "GPU " + g.index;
-    const used = g.total > 0 ? Math.max(0, Math.min(1, 1 - g.free / g.total)) : 0;
-    label.textContent = name;
-    label.title = name + " · 已用 " + Math.round(used * 100) + "%";
-    const bar = document.createElement("div");
-    bar.className = "bar";
-    const span = document.createElement("span");
-    span.style.width = (used * 100).toFixed(1) + "%";
-    bar.append(span);
-    row.append(label, bar);
-    box.append(row);
-  });
+  updateModelSummary();
 }
 
 async function refreshMeta() {
+  if (state.refreshing || document.hidden || state.authRequired) return;
+  state.refreshing = true;
+  const start = performance.now();
   try {
-    const [models, sys, jobs] = await Promise.all([api("/v1/models"), api("/v1/system"), api("/v1/jobs")]);
+    const [models, sys, jobs, network] = await Promise.all([api("/v1/models"), api("/v1/system"), api("/v1/jobs"), api("/v1/network")]);
+    renderNetwork(network);
     renderModels(models);
+    renderModelFiles();
     renderSystem(sys);
+    $("connection").textContent = "API 已連線";
+    $("connection").className = "connected";
+    $("api-state").textContent = "回應 " + Math.round(performance.now() - start) + " ms";
+    $("api-error").textContent = "";
     state.jobs = (jobs && jobs.data) || [];
+    const running = state.jobs.find((j) => !isTerminal(j.status));
+    if (!state.activeId && running) { state.activeId = running.id; state.viewId = running.id; watch(running.id); }
+    updateModelActions();
     renderHistory();
-    if (state.viewId && state.viewId !== state.activeId) {
-      const found = state.jobs.find((j) => j.id === state.viewId);
-      if (found) showJob(found);
-    }
+    const viewed = state.jobs.find((j) => j.id === state.viewId);
+    if (viewed) onJob(viewed);
+    if (state.activeId) updateRun(state.jobs.find((j) => j.id === state.activeId));
   } catch (e) {
-    $("queue").textContent = "離線";
-  }
+    if (e.status === 401) {
+      state.authRequired = true;
+      document.querySelectorAll("[data-view]").forEach((b) => { const active = b.dataset.view === "api-panel"; b.setAttribute("aria-pressed", String(active)); $(b.dataset.view).hidden = !active; });
+    }
+    $("connection").textContent = "API 無法連線";
+    $("connection").className = "warn";
+    $("api-state").textContent = "無法連線";
+    $("monitor-error").textContent = "資料可能已過期：" + e.message;
+    $("api-error").textContent = e.status === 401 ? "服務需要 API 金鑰，請輸入後按測試連線。" : e.message;
+  } finally { state.refreshing = false; }
 }
 
-function renderLoras(rows) {
-  const box = $("loras");
-  box.replaceChildren();
-  if (!rows.length) {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "目錄裡沒有 .safetensors";
-    box.append(p);
-    return;
-  }
-  rows.forEach((row) => {
-    const line = document.createElement("div");
-    line.className = "lora";
-    const lab = document.createElement("label");
-    const boxIn = document.createElement("input");
-    boxIn.type = "checkbox";
-    boxIn.value = row.name;
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = row.name;
-    name.title = row.name;
-    lab.append(boxIn, name);
-    const range = document.createElement("input");
-    range.type = "range";
-    range.min = "0";
-    range.max = "2";
-    range.step = "0.05";
-    range.value = "1";
-    const scale = document.createElement("span");
-    scale.className = "scale";
-    scale.textContent = "1.00";
-    range.addEventListener("input", () => {
-      scale.textContent = Number(range.value).toFixed(2);
-    });
-    line.append(lab, range, scale);
-    box.append(line);
-  });
+function pollWatch(id) {
+  if (state.pollTimer) clearInterval(state.pollTimer);
+  let pending = false;
+  state.pollTimer = setInterval(async () => {
+    if (pending) return;
+    pending = true;
+    try {
+      const job = await api("/v1/jobs/" + encodeURIComponent(id));
+      onJob(job);
+      if (isTerminal(job.status)) { closeSource(); refreshMeta(); }
+    } catch (e) { showFormError(e.message); }
+    finally { pending = false; }
+  }, 1000);
 }
 
 async function loadLoras() {
   try {
     const data = await api("/v1/loras");
-    renderLoras((data && data.data) || []);
+    state.loraRows = (data && data.data) || [];
+    renderLoras(state.loraRows);
+    if (state.activeId) setBusy(true);
   } catch (e) {
     const box = $("loras");
     box.replaceChildren();
@@ -507,31 +481,28 @@ async function loadLoras() {
   }
 }
 
-function selectedLoras() {
-  const out = [];
-  document.querySelectorAll("#loras .lora").forEach((row) => {
-    const box = row.querySelector('input[type="checkbox"]');
-    if (!box || !box.checked) return;
-    out.push({ name: box.value, scale: Number(row.querySelector('input[type="range"]').value) });
-  });
-  return out;
-}
-
 function renderRefs() {
   const list = $("ref-list");
+  $("refs-count").textContent = state.refs.length + " / 10";
+  updateRequestPreview();
   list.replaceChildren();
   state.refs.forEach((ref, index) => {
     const li = document.createElement("li");
+    const thumbnail = document.createElement("img");
+    thumbnail.src = ref.url;
+    thumbnail.alt = "參考圖 " + (index + 1);
+    thumbnail.className = "ref-thumb";
     const name = document.createElement("span");
     name.textContent = ref.name;
     const remove = document.createElement("button");
     remove.type = "button";
     remove.textContent = "移除";
+    remove.setAttribute("aria-label", "移除 " + ref.name);
     remove.addEventListener("click", () => {
       state.refs.splice(index, 1);
       renderRefs();
     });
-    li.append(name, remove);
+    li.append(thumbnail, name, remove);
     list.append(li);
   });
 }
@@ -551,72 +522,21 @@ async function addFiles(fileList) {
       showFormError("只接受 PNG 或 JPEG");
       continue;
     }
-    state.refs.push({ name: file.name, url: await readFile(file) });
+    try { state.refs.push({ name: file.name, url: await readFile(file) }); }
+    catch (e) { showFormError(e.message); }
   }
   renderRefs();
 }
 
-function integerIn(raw, min, max) {
-  if (!/^-?\d+$/.test(String(raw).trim())) return null;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < min || n > max) return null;
-  return n;
-}
-
 async function onSubmit(ev) {
   ev.preventDefault();
-  if (state.activeId) return;
+  if (state.activeId || state.submitting || state.modelChanging) return;
+  state.submitting = true;
+  setBusy(true);
+  $("generate").disabled = true;
   showFormError("");
-  const prompt = $("prompt").value.trim();
-  if (!prompt) return showFormError("請先寫提示詞");
-  if ([...prompt].length > 8000) return showFormError("提示詞超過 8000 字");
-  const steps = integerIn($("steps").value, 1, 200);
-  if (steps == null) return showFormError("步數必須是 1 到 200 的整數");
-  const seedText = $("seed").value.trim();
-  const seed = seedText === "" ? -1 : integerIn(seedText, -1, 9223372036854775807);
-  if (seed == null) return showFormError("種子必須是整數，-1 表示隨機");
-  const kind = state.mode;
-  const model = modelId(kind);
-  if (!model) return showFormError("沒有可用的模型");
-  const size = selectedSize();
-  const body = { type: kind, model, prompt, size: size.w ? size.w + "x" + size.h : "auto", steps, seed };
   try {
-    if (kind === "image") {
-      const cfg = Number($("cfg").value);
-      if (!Number.isFinite(cfg) || cfg < 0 || cfg > 20) return showFormError("CFG 必須介於 0 與 20");
-      body.cfg_scale = cfg;
-      const negative = $("negative").value.trim();
-      if (negative) body.negative_prompt = negative;
-      if (state.refs.length) body.images = state.refs.map((ref) => ref.url);
-      if (!size.w && !state.refs.length) return showFormError("「依參考圖比例」需要先加參考圖");
-      const sigText = $("sigmas").value.trim();
-      if (sigText) {
-        const sig = sigText.split(/[,，\s]+/).filter(Boolean).map(Number);
-        if (!sig.every((v) => Number.isFinite(v) && v > 0 && v <= 1)) return showFormError("sigma 節點必須是 0 到 1 之間的數字");
-        body.sigmas = sig;
-      }
-      if (!$("shift-terminal").checked) body.shift_terminal = false;
-    } else {
-      const frames = integerIn($("frames").value, 5, 361);
-      if (frames == null) return showFormError("幀數必須是 5 到 361 的整數");
-      body.num_frames = frames;
-      const first = $("first-frame").files[0];
-      const last = $("last-frame").files[0];
-      if (first) body.first_frame = await readFile(first);
-      if (last) body.last_frame = await readFile(last);
-      const shift = Number($("video-shift").value);
-      if (!Number.isFinite(shift) || shift < 0.5 || shift > 50) return showFormError("影片 shift 必須介於 0.5 與 50");
-      if (shift !== 12) body.video_shift = shift;
-      if (state.vrefs.length) {
-        if (first || last) return showFormError("參考生成不能和首尾幀同時使用");
-        if (state.vrefs.every((r) => r.kind === "audio")) return showFormError("音訊參考需要搭配圖片或影片");
-        body.references = state.vrefs.map((r) => ({ type: r.kind, data: r.url }));
-      }
-    }
-    const loras = selectedLoras();
-    if (loras.length) body.loras = loras;
-    const compute = $("compute").value;
-    if (compute) body.compute = compute;
+    const body = await buildRequest();
     const job = await api("/v1/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -631,6 +551,10 @@ async function onSubmit(ev) {
     watch(job.id);
   } catch (e) {
     showFormError(e.message || "送出失敗");
+  } finally {
+    state.submitting = false;
+    $("generate").disabled = false;
+    if (!state.activeId) setBusy(false);
   }
 }
 
@@ -695,6 +619,8 @@ function bind() {
 
 applyMode();
 bind();
+bindControls();
 refreshMeta();
 loadLoras();
 setInterval(refreshMeta, 3000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshMeta(); });

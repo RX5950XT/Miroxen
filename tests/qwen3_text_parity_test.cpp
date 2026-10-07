@@ -1,6 +1,7 @@
 // Qwen3-VL 文字編碼器與 transformers 的數值比對（tools/ref/qwen3_text_ref.py 產生參考）。
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <vector>
 
@@ -45,6 +46,14 @@ int main() {
       te.encode(c, ids, out.as<bf16>());
       std::vector<uint16_t> raw(n * dim);
       MX_CUDA(cudaMemcpy(raw.data(), out.get(), raw.size() * 2, cudaMemcpyDeviceToHost));
+      MX_CUDA(cudaMemset(out.get(), 0, out.size()));
+      te.encode(c, ids, out.as<bf16>());
+      std::vector<uint16_t> cached(n * dim);
+      MX_CUDA(cudaMemcpy(cached.data(), out.get(), cached.size() * 2, cudaMemcpyDeviceToHost));
+      bool cache_same = te.cache_stats().hits == 1 &&
+                        std::memcmp(raw.data(), cached.data(), raw.size() * sizeof(uint16_t)) == 0;
+      std::printf("CUDA 快取確實命中且輸出與首次逐位元一致：%s\n", cache_same ? "PASS" : "FAIL");
+      fails += !cache_same;
       std::vector<float> got(n * dim), expect(n * dim);
       dequant_cpu(raw.data(), GType::BF16, n * dim, got.data());
       const WeightRef& hr = rs.get("hidden");

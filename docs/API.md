@@ -1,6 +1,6 @@
 # Miroxen HTTP API
 
-本機推論服務。預設只聽 `127.0.0.1:8188`。JSON 使用 UTF-8。時間戳是 Unix 秒。
+本機推論服務。預設聽 `0.0.0.0:8188`，同一區域網路可存取；指定 `--host 127.0.0.1` 可限制本機。JSON 使用 UTF-8。時間戳是 Unix 秒。
 
 面板在 `GET /`，靜態資源在 `/web/`，生成檔在 `/files/`。這三條與 `GET /health` 不需要金鑰。`api_key` 不是空字串時，所有 `/v1/*` 都要帶：
 
@@ -36,7 +36,8 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 
 `GET /health` → `{"status":"ok"}`
 
-`GET /v1/models` 為 OpenAI 風格清單。`kind` 是 `image` 或 `video`，`loaded` 表示能不能用。
+`GET /v1/models` 為 OpenAI 風格清單。`kind` 是 `image` 或 `video`，`loaded` 表示是否已載入；未載入仍可生成，第一次會按需載入。
+`files` 是按角色分組的已安裝檔名；`defaults` 為預設檔名、`active_files` 為目前已載入路徑、`default_compute` 為伺服器預設運算精度。生成中查詢不等待整次推論完成。
 
 ```json
 {"object":"list","data":[{"id":"qwen-image-2.1","object":"model","owned_by":"miroxen","kind":"image","loaded":true,"detail":"..."}]}
@@ -58,19 +59,27 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 
 ## 生成參數
 
-`model` 必填，而且必須已載入、種類相符。`prompt` 去掉前後空白後不可為空，最多 8000 個 Unicode 碼位。`negative_prompt` 同樣上限，可省略。`n` 若出現必須是整數 `1`。
+完成工作的 `result.timings` 提供各階段秒數；與 `result.seconds` 一樣不含佇列等待、首次模型載入和 HTTP 傳輸。
+圖片分成 `lora`、`input`、`text_vision_encode`、`vae_encode`、`dit_prepare`、`denoise`、`latent_layout_transfer`、`vae_decode`、`png_encode`。
+影片分成 `model_lora`、`input_encode`、`text_encode`、`dit_prepare`、`denoise`、`latent_readback`、`audio_decode_wav`、`video_prepare`、`video_vae_decode`、`ffmpeg_pipe`、`ffmpeg_finish`。
+各項不重複計費，合計約等於 `seconds`。這是階段牆鐘時間：階段內仍包含必要資料搬運；不是純 GPU 核心耗時。
+影片 `input_encode` 包含媒體讀取、視覺塔及參考素材 VAE；`ffmpeg_pipe`／`ffmpeg_finish` 是寫入／等待時間，ffmpeg 自己的計算可能與 VAE 重疊。
+`model_lora` 包含 FL2VA／Ref2VA 間切換 DiT checkpoint 與 LoRA 載入；外層管線的首次載入仍不計入。
+未提供分段計時的引擎（例如 `--fake`）回傳空物件。
+
+`model` 必填，而且必須是清單內種類相符的模型；未載入時引擎自動載入。`prompt` 去掉前後空白後不可為空，最多 8000 個 Unicode 碼位。`negative_prompt` 同樣上限，可省略。`n` 若出現必須是整數 `1`。
 
 `size` 是 `"寬x高"`（`x` 或 `X`，兩邊都是數字），或 `"auto"`。也可以改傳整數 `width` 與 `height`。寬與高都要是 32 的倍數。圖像是 256 到 2752，影片是 256 到 1920。
 
 `"auto"` 的意思：圖像必須帶 `images`，依最後一張參考圖的比例、約 1024² 像素；影片有首幀時依首幀比例（只給尾幀就依尾幀），否則 16:9，短邊 768（官方畫布，即 1344×768）。
 
-`steps` 是 1 到 200。省略時圖像 40、影片 30。影片的 `steps` 是取樣點數，實際前向次數＝steps − 1（「8 步」加速 LoRA 要傳 9）。`cfg_scale` 若出現必須是 0 到 20 的有限數字；只有圖像會把它交給引擎，預設 1。`seed` 是整數，省略或 `-1` 表示由引擎抽一個。
+`steps` 圖像是 1 到 200，影片是 2 到 200。省略時圖像 40、影片 30。影片的 `steps` 是取樣點數，實際前向次數＝steps − 1（「8 步」加速 LoRA 要傳 9）。`cfg_scale` 若出現必須是 0 到 20 的有限數字；只有圖像會把它交給引擎，預設 1。`seed` 是整數，省略或 `-1` 表示由引擎抽一個。
 
 `loras` 是 `[{"name":"檔名.safetensors","scale":1.0}]`。`name` 只能是目錄裡的檔名：拒絕 `..`、絕對路徑、斜線、反斜線與磁碟機冒號。`scale` 預設 1。
 
 `images`、`first_frame`、`last_frame` 是 base64，或 `data:image/...;base64,...`。內容必須是能解出來的 PNG 或 JPEG。`images` 是圖像編輯的參考圖，最多 10 張；首幀、尾幀各一張，可以只給一張或都省略。上傳檔會先存到 `out_dir/tmp`，工作結束後刪除。
 
-影片幀數欄位是 `num_frames`（也接受 `frames`），5 到 361，預設 56。
+影片幀數欄位是 `num_frames`（也接受 `frames`），5 到 361，預設 56。實際輸出向上對齊至 17n+5，最少 22 幀（約 0.92 秒），以滿足 VAE 解碼需求。
 
 `shift_terminal` 只用於圖像，布林值，預設 `true`（官方排程：最後一步拉伸到 0.02）。步數蒸餾 LoRA（例如 Turbo8）要設 `false`。
 
@@ -144,9 +153,24 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 
 ## 面板
 
-`web/` 是不需建置步驟的頁面，文字是繁體中文。它呼叫 `/v1/models`、`/v1/system`、`/v1/loras`、`/v1/jobs`，並用 EventSource 訂進度。瀏覽器的 EventSource 不能加 `Authorization`，所以開金鑰時請用其他客戶端，或把金鑰留空給本機面板。
+`web/` 是不需建置步驟的頁面，文字是繁體中文。它呼叫 `/v1/models`、`/v1/system`、`/v1/loras`、`/v1/jobs`，免金鑰時用 EventSource 訂進度。API 分頁可輸入金鑰（只放目前頁面記憶體，不寫儲存）；使用金鑰或 SSE 斷線時以每秒輪詢更新工作。
+
+生成請求可加 `model_files`，例如 `{"dit":"qwen_image_2.1-Q4_K.gguf","vae":"qwen_image_2.1_vae_bf16.safetensors"}`。只接受該模型 `/v1/models` 列出的角色與檔名；其他值回 `invalid_model_files`。換檔與換運算精度都會重新載入，省略角色時回到伺服器預設。
+
+`GET /v1/system` 保留原本 `gpus`、`queue_length`，另提供：
+- `host`：`cpu_percent`、`ram_total`、`ram_used`，整台電腦的用量。
+- `process`：Miroxen 的 `cpu_percent`（占全機 CPU 容量）、`ram_used`（working set）。RAM 單位均為 bytes。
+- 每張 GPU：`utilization_percent`、`temperature_c`、`power_w`；透過 NVIDIA 驅動的 NVML 取得，按 PCI bus 對應 CUDA 卡號。驅動不提供的值為 `null`，不以 0 假裝閒置。
+- `api`：`requests`、`errors`（已完成的 `/v1/*` 請求，包含監控輪詢與 4xx／5xx）、`uptime_seconds`、`authentication`。重啟後歸零。CPU 首筆尚無採樣間隔時為 `null`；目前主機用量支援 Windows。
+
+`GET /v1/loras` 每筆新增 `model`、`purpose`、`task`、`preset`。目前已知的加速版本提供精確預設；其他檔案可能無法識別，此時 `model:"unknown"` 並附提示，不承諾相容性。
+工作物件新增 `parameters`，含輸出設定、LoRA、預計對齊後的影片幀數、24 fps 與秒數；不包含 base64 素材。`result.seconds` 仍為生成耗時，和影片播放長度不同。
 
 面板功能重點：
+- 創作／硬體監控／API 三個分頁；自訂 32 倍數尺寸、目標秒數和對齊後影片長度、結果下載。
+- 圖片任務：生成／編輯、透明圖、去背、局部修改。後三者是提示詞與參考圖的操作入口；局部修改需原圖＋遮罩圖，沒有像素鎖定保證。
+- LoRA 依模型／FL2VA／Ref2VA 篩選；一次一顆已知加速 LoRA，可疊畫風。勾選時套用步數、sigma、CFG、shift；取消加速或換任務時回原版排程。沒有逐步切換 LoRA 的 9 步混合模式。
+- 模型檔按已安裝清單選擇；參考素材短邊與影片原生畫布可調。API 分頁可預覽／複製相同設定的完整 JSON。
 - 尺寸：圖像多一個「依參考圖比例」（送 `size:"auto"`，需要先加參考圖）；影片預設選項是 864×480、1344×768（官方）、480×864、自動。
 - 取樣排程進階區：自訂 sigma 節點、尾端拉伸（`shift_terminal`）勾選。
 - 參考生成清單：拖放圖片、影片或音訊（依序，最多 12 個），每列顯示提示詞要用的標籤（`<Picture 1>` 等）。
@@ -162,3 +186,14 @@ build\server_test.exe serve 8188
 ```
 
 工作目錄要在專案根目錄，這樣才找得到 `web/`。
+
+## 模型管理與區域網路
+
+`GET /v1/network` 回傳 `host`、`port`、`lan_enabled`、`urls`（本機網卡的 IPv4 網址，可能含 VPN）。
+
+`POST /v1/models/load` 接受 `model`、選填 `model_files` 與 `compute`，載入指定模型並卸載上一顆；回傳與 `/v1/models` 相同的清單。不產生作品，也不套用 LoRA。
+`POST /v1/models/unload`（JSON 本文 `{}`）卸載所有常駐模型，回傳更新後的清單；下次生成仍會自動載入。
+生成／排隊中不能管理模型；管理中不能建立工作，回應 `409 model_busy`。以上端點遵循既有 Bearer 金鑰設定。
+區域網路連線需 Windows 防火牆允許服務；金鑰可用 `--api-key` 設定，網路存取不會自動繞過驗證。
+
+模型管理端點要求 `Content-Type: application/json`；其他格式回應 `415 unsupported_media_type`。

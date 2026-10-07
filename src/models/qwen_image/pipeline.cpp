@@ -6,6 +6,8 @@
 
 #include "server/image_io.h"
 #include "kernels/ops.h"
+#include "core/timing.h"
+#include "kernels/qwen_latent.h"
 
 namespace mx {
 
@@ -62,6 +64,10 @@ QwenImagePipeline::QwenImagePipeline(const QwenImagePaths& p, QwenImageDevices d
   te_ctx_ = std::make_unique<Ctx>(dev_.text, size_t(512) << 20, te_->scratch_bytes() * 2);
   dit_ = std::make_unique<QwenImageDit>(dit_st_, dev_.dit, d.compute);
   vae_ = std::make_unique<QwenImageVae>(vae_st_, dev_.vae);
+  latent_stats_ = DevBuf(128 * sizeof(float), dev_.vae);
+  MX_CUDA(cudaSetDevice(dev_.vae));
+  MX_CUDA(cudaMemcpy(latent_stats_.get(), QwenImageVae::latents_mean(), 64 * sizeof(float), cudaMemcpyHostToDevice));
+  MX_CUDA(cudaMemcpy(latent_stats_.as<float>() + 64, QwenImageVae::latents_std(), 64 * sizeof(float), cudaMemcpyHostToDevice));
 
   // 最大解析度 2752×1536（16512 token）+ 2048 文字 token 的啟用值上限；編輯時依參考圖再放大。
   ensure_dit_ctx(16512 + 2048);
@@ -181,12 +187,14 @@ void QwenImagePipeline::apply_loras(const std::vector<LoraSpec>& loras) {
 ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn& cb,
                                         const std::atomic<bool>* cancel) {
   auto t0 = std::chrono::steady_clock::now();
+  PhaseTimer timer;
   MX_CHECK(r.ref_images.size() <= 10, "參考圖最多 10 張");
   auto report = [&](const char* st, int i, int n) {
     if (cb) cb(Progress{st, i, n});
     if (cancel && cancel->load()) throw std::runtime_error("已取消");
   };
   apply_loras(r.loras);
+  timer.mark("lora");
   report("encode", 0, 1);
   // 參考圖：各自縮放到約 1024² 像素（保持比例、32 的倍數），同一份同時給視覺塔（白底）與 VAE（RGBA）。
   std::vector<Rgba> refs;
@@ -203,43 +211,43 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
   const bool cfg = r.cfg_scale > 1.f && !r.negative_prompt.empty();
   int64_t T = 0, Tn = 0;
   std::vector<int64_t> slots, nslots;
+  timer.mark("input");
   auto txt = encode_prompt(r.prompt, T, refs, &slots);
   std::vector<bf16> ntxt;
   if (cfg) ntxt = encode_prompt(r.negative_prompt, Tn, refs, &nslots);
 
+  timer.mark("text_vision_encode");
   const int64_t H = out_h / 16, W = out_w / 16, N = H * W, C = dit_->cfg().in_ch;
+  MX_CHECK(C == 64, "Qwen latent 通道數必須是 64");
   // 參考圖 latent：VAE 取分佈平均，(z − mean) / std，排成 [H·W, 64]。
-  std::vector<std::vector<float>> cond_lat;
+  std::vector<DevBuf> cond_dev;
   int64_t cond_rows = 0;
   for (auto& ref : refs) {
     Ctx& vc = vae_ctx_ ? *vae_ctx_ : *dit_ctx_;
-    const int64_t lh = ref.h / 16, lw = ref.w / 16, n = lh * lw;
-    std::vector<float> z(n * C), rows(n * C);
-    {
-      ArenaScope sc(vc.act);
-      float* dz = vc.act.alloc_n<float>(n * C);
-      vae_->encode(vc, ref.px.data(), ref.h, ref.w, dz);
-      MX_CUDA(cudaMemcpy(z.data(), dz, z.size() * 4, cudaMemcpyDeviceToHost));
+    vc.use();
+    const int64_t n = (ref.h / 16) * (ref.w / 16);
+    ArenaScope sc(vc.act);
+    float* dz = vc.act.alloc_n<float>(n * C);
+    DevBuf rows(n * C * sizeof(float), vc.device);
+    vae_->encode(vc, ref.px.data(), ref.h, ref.w, dz);
+    qwen_latent::encode(dz, rows.as<float>(), n, latent_stats_.as<float>(), latent_stats_.as<float>() + 64, vc.stream);
+    vc.sync();
+    if (vc.device == dev_.dit) cond_dev.push_back(std::move(rows));
+    else {
+      cond_dev.emplace_back(rows.size(), dev_.dit);
+      MX_CUDA(cudaMemcpyPeer(cond_dev.back().get(), dev_.dit, rows.get(), vc.device, rows.size()));
     }
-    const float *mean = QwenImageVae::latents_mean(), *stdv = QwenImageVae::latents_std();
-    for (int64_t i = 0; i < n; i++)
-      for (int64_t ch = 0; ch < C; ch++) rows[i * C + ch] = (z[ch * n + i] - mean[ch]) / stdv[ch];
-    cond_lat.push_back(std::move(rows));
     cond_rows += n;
   }
+  timer.mark("vae_encode");
   ensure_dit_ctx(T + cond_rows + N);
   Ctx& c = *dit_ctx_;
   c.use();
-  std::vector<DevBuf> cond_dev;
   auto conds_for = [&](const std::vector<int64_t>& sl) {
+    MX_CHECK(sl.size() == refs.size(), "參考圖與文字位置數量不符");
     std::vector<QwenImageCond> v;
-    for (size_t i = 0; i < refs.size(); i++) {
-      if (cond_dev.size() <= i) {
-        cond_dev.emplace_back(cond_lat[i].size() * 4, c.device);
-        MX_CUDA(cudaMemcpy(cond_dev[i].get(), cond_lat[i].data(), cond_lat[i].size() * 4, cudaMemcpyHostToDevice));
-      }
+    for (size_t i = 0; i < refs.size(); i++)
       v.push_back({sl[i], refs[i].h / 16, refs[i].w / 16, cond_dev[i].as<float>()});
-    }
     return v;
   };
   QwenImageSeq pos, neg;
@@ -267,6 +275,8 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
 
   auto sig = qwen_image_sigmas(r.steps, N, r.shift_terminal, r.sigmas);
   const int steps = int(sig.size()) - 1;
+  c.sync();
+  timer.mark("dit_prepare");
   for (int i = 0; i < steps; i++) {
     report("denoise", i, steps);
     dit_->forward(c, pos, lat.as<float>(), sig[i], vel.as<float>());
@@ -277,25 +287,35 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
     }
     axpy_f32(lat.as<float>(), vel.as<float>(), sig[i + 1] - sig[i], N * C, c.stream);
   }
+  c.sync();
+  timer.mark("denoise");
   report("decode", 0, 1);
-  // [N, C] → [C, H, W] 並反正規化。
-  std::vector<float> host(N * C), z(N * C);
-  MX_CUDA(cudaMemcpy(host.data(), lat.get(), host.size() * 4, cudaMemcpyDeviceToHost));
-  const float *mean = QwenImageVae::latents_mean(), *stdv = QwenImageVae::latents_std();
-  for (int64_t n = 0; n < N; n++)
-    for (int64_t ch = 0; ch < C; ch++) z[ch * N + n] = host[n * C + ch] * stdv[ch] + mean[ch];
+  // 同卡直接在 GPU 轉置／反正規化；跨卡只搬 latent，不經 CPU 改寫。
   Ctx& vc = vae_ctx_ ? *vae_ctx_ : c;
   vc.use();
   std::vector<uint8_t> rgba;
   {
-    DevBuf dz(z.size() * 4, vc.device);
-    MX_CUDA(cudaMemcpy(dz.get(), z.data(), z.size() * 4, cudaMemcpyHostToDevice));
+    DevBuf transferred;
+    const float* src = lat.as<float>();
+    if (vc.device != c.device) {
+      transferred = DevBuf(lat.size(), vc.device);
+      MX_CUDA(cudaMemcpyPeer(transferred.get(), vc.device, lat.get(), c.device, lat.size()));
+      src = transferred.as<float>();
+    }
+    DevBuf dz(lat.size(), vc.device);
+    qwen_latent::decode(src, dz.as<float>(), N, latent_stats_.as<float>(), latent_stats_.as<float>() + 64, vc.stream);
+    vc.sync();
+    timer.mark("latent_layout_transfer");
     vae_->decode(vc, dz.as<float>(), H, W, rgba);
+    vc.sync();
   }
+  timer.mark("vae_decode");
   ImageResult res;
   res.width = int(W * 16);
   res.height = int(H * 16);
   res.png = encode_png(rgba.data(), res.width, res.height, 4);
+  timer.mark("png_encode");
+  res.timings = std::move(timer.seconds);
   res.seed = seed;
   res.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   report("done", 1, 1);
