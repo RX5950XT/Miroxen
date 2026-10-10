@@ -13,6 +13,9 @@ void dequant_to_bf16(const void* src, GType t, int64_t n, bf16* dst, cudaStream_
 void dequant_to_f32(const void* src, GType t, int64_t n, float* dst, cudaStream_t s);
 bool dequant_supported(GType t);
 
+// bf16 → GGUF Q8_0（每 32 個一塊：fp16 scale + 32 個 int8），n 必須是 32 的倍數。給顯存小的卡省一半權重。
+void quantize_q8_0(const bf16* src, int64_t n, void* dst, cudaStream_t s);
+
 // CPU 參考實作（測試與小張量用）：dst 為 n 個 float。
 void dequant_cpu(const void* src, GType t, int64_t n, float* dst);
 

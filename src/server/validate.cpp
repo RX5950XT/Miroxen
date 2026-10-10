@@ -42,6 +42,8 @@ bool ends_with_ci(const std::string& s, const std::string& suf) {
   return true;
 }
 
+}  // namespace
+
 bool lora_name_ok(const std::string& name) {
   if (name.empty() || name.size() > 240 || name == "." || name == "..") return false;
   if (name.find("..") != std::string::npos) return false;
@@ -73,6 +75,8 @@ std::map<std::string, std::filesystem::path> lora_files(const ServerOptions& opt
   }
   return files;
 }
+
+namespace {
 
 std::string resolve_lora(const ServerOptions& opt, const std::string& name) {
   if (!lora_name_ok(name))
@@ -387,6 +391,7 @@ json job_value(const Job& job) {
                        {"steps", video ? job.video.steps : int(job.image.sigmas.empty() ? job.image.steps : job.image.sigmas.size())},
                        {"compute", video ? job.video.compute : job.image.compute}, {"loras", ls}};
   if (video) { j["parameters"]["num_frames"] = frames; j["parameters"]["fps"] = 24; j["parameters"]["duration_seconds"] = frames / 24.0; }
+  else j["parameters"]["model"] = job.image.model;
   return j;
 }
 
@@ -400,7 +405,11 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
     int n = read_int(j, "n", 1);
     if (n != 1) throw ApiError(400, "invalid_request_error", "invalid_n", "n 必須是 1");
   }
-  int steps = read_int(j, "steps", type == "video" ? 30 : 40);
+  const std::string model_id = trim(j["model"].get<std::string>());
+  const bool turbo = model_id == kQwenTurboId;
+  int steps = read_int(j, "steps", type == "video" ? 30 : turbo ? 8 : 40);
+  if (turbo && steps != 8 && !j.contains("sigmas"))
+    throw ApiError(400, "invalid_request_error", "invalid_steps", "Turbo 固定 8 步；其他節點請改給 sigmas");
   int min_steps = type == "video" ? 2 : 1;
   if (steps < min_steps || steps > 200)
     throw ApiError(400, "invalid_request_error", "invalid_steps", "steps 必須介於 " + std::to_string(min_steps) + " 與 200");
@@ -425,6 +434,7 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
   job->prompt = prompt;
   job->response_format = read_format(j);
   if (type == "image") {
+    job->image.model = model_id;
     job->image.prompt = std::move(prompt);
     job->image.negative_prompt = std::move(negative);
     job->image.width = w;
@@ -541,10 +551,7 @@ std::string loras_json(const ServerOptions& opt) {
       std::string lower = name;
       std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return char(std::tolower(c)); });
       if (lower.find("minimax_h3") != std::string::npos) row["model"] = "minimax-h3";
-      if (lower.find("qwen") != std::string::npos || lower == "turbo8_lora_step2500.safetensors" || lower == "zzz_chibi_v2_st2500.safetensors") row["model"] = "qwen-image-2.1";
-      const bool viggle = name == "Qwen-Image-2.1-viggle-turbo-v0.3-6step-lora-r256.safetensors";
-      if (viggle) row["preset"] = {{"steps", 6}, {"sigmas", {1., .9375, .875, .75, .5, .25}}, {"shift_terminal", false}, {"cfg_scale", 1}};
-      if (lower == "turbo8_lora_step2500.safetensors") row["preset"] = {{"steps", 8}, {"shift_terminal", false}, {"cfg_scale", 1}};
+      if (lower.find("qwen") != std::string::npos || lower == "zzz_chibi_v2_st2500.safetensors") row["model"] = "qwen-image-2.1";
       if (lower == "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors") row["preset"] = {{"steps", 9}, {"video_shift", 6}};
       if (lower == "minimax_h3_fl2v_turbo_4step_v1.2_768p_bf16.safetensors") row["preset"] = {{"steps", 5}, {"video_shift", 6}};
       if (lower == "minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors") row["preset"] = {{"steps", 9}, {"video_shift", 12}};
@@ -552,15 +559,11 @@ std::string loras_json(const ServerOptions& opt) {
       if (lower == "zzz_chibi_v2_st2500.safetensors") row["purpose"] = "style";
       row["task"] = lower.find("_ref2v_") != std::string::npos ? "reference" : lower.find("_fl2v_") != std::string::npos ? "first_last" : "any";
       if (row["model"] == "unknown") {
-        try {
-          TensorStore store;
-          store.add_file(path_utf8(path));
-          for (const auto& key : store.names()) {
-            if (key.find("transformer_blocks.") != std::string::npos) { row["model"] = "qwen-image-2.1"; break; }
-            if (key.starts_with("blocks.") || key.find("token_refiner.") != std::string::npos) { row["model"] = "minimax-h3"; break; }
-          }
-        } catch (const std::exception&) { row["warning"] = "無法識別模型，使用前請確認檔案相容性"; }
+        auto kind = lora_model_kind(path);
+        if (kind.empty()) row["warning"] = "無法識別模型，使用前請確認檔案相容性";
+        else row["model"] = kind;
       }
+      if (row["model"] == "qwen-image-2.1" && row["purpose"] == "unknown") row["purpose"] = "style";  // 圖片已無加速 LoRA
       rows.push_back(std::move(row));
     }
     std::sort(rows.begin(), rows.end(), [](const json& a, const json& b) {

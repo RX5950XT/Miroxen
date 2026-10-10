@@ -3,6 +3,7 @@
 #include "server/server_internal.h"
 
 #include <chrono>
+#include <fstream>
 #include <utility>
 #include <algorithm>
 #include "nlohmann/json.hpp"
@@ -161,7 +162,11 @@ struct Server::Impl {
   std::atomic<uint64_t> requests{0}, errors{0};
   std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
 
-  Impl(Engine& engine_in, ServerOptions opt_in) : engine(engine_in), opt(std::move(opt_in)) {}
+  std::unique_ptr<LoraInstaller> installer;
+
+  Impl(Engine& engine_in, ServerOptions opt_in) : engine(engine_in), opt(std::move(opt_in)) {
+    installer = std::make_unique<LoraInstaller>(opt);
+  }
 
   void signal_finished() {
     std::lock_guard lk(wait_mu);
@@ -216,13 +221,20 @@ void Server::Impl::install_hooks() {
     }
     write_error(res, 500, "內部錯誤", "server_error", "internal");
   });
-  svr.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
-    if (authorized(opt, req)) return httplib::Server::HandlerResponse::Unhandled;
-    write_error(res, 401, "需要 Authorization: Bearer 金鑰", "auth_error", "unauthorized");
-    return httplib::Server::HandlerResponse::Handled;
+  const size_t limit = opt.max_body_mb == 0 ? size_t{0} : opt.max_body_mb * 1024ull * 1024ull;
+  svr.set_pre_routing_handler([this, limit](const httplib::Request& req, httplib::Response& res) {
+    if (!authorized(opt, req)) {
+      write_error(res, 401, "需要 Authorization: Bearer 金鑰", "auth_error", "unauthorized");
+      return httplib::Server::HandlerResponse::Handled;
+    }
+    // LoRA 上傳可達數 GB，其餘 API 仍套 --max-body（讀本文前用 Content-Length 擋）。
+    if (limit && req.path != "/v1/loras/upload" && req.get_header_value_u64("Content-Length") > limit) {
+      write_error(res, 413, "請求本文超過大小限制", "api_error", "payload_too_large");
+      return httplib::Server::HandlerResponse::Handled;
+    }
+    return httplib::Server::HandlerResponse::Unhandled;
   });
-  size_t limit = opt.max_body_mb == 0 ? size_t{0} : opt.max_body_mb * 1024ull * 1024ull;
-  svr.set_payload_max_length(limit);
+  svr.set_payload_max_length(std::max<size_t>(limit, size_t(8) << 30));
   // 同步生成可能要數分鐘，最後才一次寫出較大的 JSON。
   svr.set_read_timeout(120, 0);
   svr.set_write_timeout(120, 0);
@@ -299,6 +311,44 @@ void Server::Impl::route_meta() {
   });
   svr.Get("/v1/loras", [this](const httplib::Request&, httplib::Response& res) {
     guard(res, [&] { res.set_content(loras_json(opt), kJson); });
+  });
+  // 本文是 .safetensors 原始位元組，檔名放 ?name=；邊收邊寫暫存檔，不整份放記憶體。
+  svr.Post("/v1/loras/upload", [this](const httplib::Request& req, httplib::Response& res,
+                                      const httplib::ContentReader& reader) {
+    guard(res, [&] {
+      const auto name = req.get_param_value("name");
+      if (!lora_name_ok(name))
+        throw ApiError(400, "invalid_request_error", "invalid_lora", "LoRA 檔名必須以 .safetensors 結尾，且不能含路徑");
+      const auto dir = utf8_path(opt.lora_dir) / ".incoming";
+      std::filesystem::create_directories(dir);
+      const auto part = dir / ("upload-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".safetensors");  // TensorStore 依副檔名判斷格式
+      {
+        std::ofstream out(part, std::ios::binary);
+        if (!out) throw ApiError(500, "server_error", "write_failed", "無法寫入 LoRA 暫存檔");
+        bool ok = reader([&](const char* data, size_t n) { return bool(out.write(data, std::streamsize(n))); });
+        out.close();
+        if (!ok || !out) {
+          std::error_code ec;
+          std::filesystem::remove(part, ec);
+          throw ApiError(400, "invalid_request_error", "upload_failed", "上傳中斷或寫入失敗");
+        }
+      }
+      res.status = 201;
+      res.set_content(install_lora_file(opt, part, name), kJson);
+    });
+  });
+  svr.Post("/v1/loras/install", [this](const httplib::Request& req, httplib::Response& res) {
+    guard(res, [&] {
+      require_json(req);
+      auto j = nlohmann::json::parse(req.body, nullptr, false);
+      if (!j.is_object() || !j.contains("url") || !j["url"].is_string())
+        throw ApiError(400, "invalid_request_error", "invalid_url", "需要 url（字串）");
+      res.status = 202;
+      res.set_content(installer->start(j["url"].get<std::string>()), kJson);
+    });
+  });
+  svr.Get("/v1/loras/installs", [this](const httplib::Request&, httplib::Response& res) {
+    guard(res, [&] { res.set_content(installer->list_json(), kJson); });
   });
 }
 

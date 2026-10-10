@@ -13,7 +13,8 @@ class H3VideoVae {
  public:
   // st：unsloth/Comfy 的 minimax_h3_video_vae_fp16.safetensors 或 diffusers 格式 vae/ 分片（皆需支援）。
   // compute：ViT 解碼器 36 層線性層的運算精度（FP8/FP4 用區塊縮放 tensor core；不支援時退回 bf16）。
-  H3VideoVae(const TensorStore& st, int device, QMode compute = QMode::BF16);
+  // compact：顯存小的卡把解碼器線性層存成 Q8_0（用到時才還原成 bf16），權重約減半。
+  H3VideoVae(const TensorStore& st, int device, QMode compute = QMode::BF16, bool compact = false);
   ~H3VideoVae();
 
   // z：裝置 [24, F_lat, H, W] f32，DiT 輸出的「正規化」latent（本類別負責乘 std 加 mean）。
@@ -28,6 +29,7 @@ class H3VideoVae {
   void encode_video(Ctx& c, const uint8_t* rgb, int64_t F, int64_t h, int64_t w, float* z);
   static int64_t encoded_frames(int64_t F) { return F == 1 ? 1 : (F + 16) / 17 * 5 - 3; }
   size_t decode_act_bytes(int64_t H, int64_t W) const;
+  size_t scratch_bytes() const;  // 解碼 Ctx 的反量化暫存（compact 時才需要）
 
  private:
   struct Impl;

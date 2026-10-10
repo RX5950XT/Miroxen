@@ -20,6 +20,7 @@ struct QwenImagePaths {
   std::string vae;           // VAE safetensors
   std::string tokenizer;     // tokenizer.json
   std::string mmproj;        // Qwen3-VL 視覺塔（編輯用，第一次用到才載入）
+  bool turbo = false;        // Qwen-Image-2.1-Turbo：預設用固定 8 步排程，不位移
 };
 
 struct QwenImageDevices {
@@ -43,7 +44,7 @@ class QwenImagePipeline {
 
  private:
   void apply_loras(const std::vector<LoraSpec>& loras);
-  void ensure_dit_ctx(int64_t rows);
+  void ensure_dit_ctx(int64_t rows, size_t min_bytes = 0);
 
   QwenImagePaths paths_;
   QwenImageDevices dev_;
@@ -59,13 +60,15 @@ class QwenImagePipeline {
   std::unique_ptr<Ctx> vis_ctx_;
   std::vector<LoraSpec> active_loras_;
   int drop_idx_ = 0;
+  bool compact_ = false;  // 編碼器與 DiT 同卡：啟用值先配小、按需放大
 };
 
 // FlowMatch Euler（Qwen-Image-2.1 設定：exponential dynamic shift + shift_terminal 0.02）。
 // 回傳 steps+1 個 sigma（最後一個為 0）。
 // nodes 非空時用自訂的未位移節點（如 viggle turbo 的 [1, 0.9375, 0.875, 0.75, 0.5, 0.25]），steps 取其長度。
+// raw=true（Turbo）：nodes 原值直接用，不做位移。
 std::vector<float> qwen_image_sigmas(int steps, int64_t image_tokens, bool shift_terminal = true,
-                                     const std::vector<float>& nodes = {});
+                                     const std::vector<float>& nodes = {}, bool raw = false);
 // 依目標面積與長寬比算出 32 倍數的寬高（diffusers calculate_dimensions）。
 void qwen_image_dims(double area, double ratio, int& w, int& h);
 

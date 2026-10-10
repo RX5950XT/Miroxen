@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <vector>
+#include "core/streamer.h"
 #include "core/weights.h"
 
 using namespace mx;
@@ -51,9 +52,22 @@ int main() {
         l.loras.push_back(d); dw.merge_loras(c, l); check(80.f);
         l.loras.clear(); dw.merge_loras(c, l); check(64.f);
       }
+      // 串流版：兩份來源在槽內位元組相接，結果與常駐接合相同（BF16 與 FP8 槽）。
+      for (QMode m : {QMode::BF16, QMode::MXFP8}) {
+        if (m != QMode::BF16 && !qmode_supported(m, 0)) continue;
+        Linear sl = make_linear_streamed_concat(dw, "fused_stream", "gate", "proj");
+        MX_CHECK(sl.out == 128 && sl.in == 64 && sl.sources.size() == 2, "串流接合形狀錯誤");
+        BlockStreamer bs(0, m);
+        bs.add_block(st, {&sl});
+        bs.finalize();
+        bs.acquire(c, 0);
+        std::swap(l, sl);
+        check(64.f);
+        std::swap(l, sl);
+      }
     }
     std::filesystem::remove(path);
-    std::puts("PASS：FFN 接合、形狀驗證、LoRA 合併／還原");
+    std::puts("PASS：FFN 接合、形狀驗證、LoRA 合併／還原、串流接合");
     return 0;
   } catch (const std::exception& e) {
     std::filesystem::remove(path);

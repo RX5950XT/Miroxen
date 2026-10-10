@@ -13,6 +13,9 @@ namespace mx {
 
 // 只讀 metadata、不上傳權重的線性層（w.p 由 BlockStreamer 填入）；bias 仍常駐 GPU（f32）。
 Linear make_linear_streamed(DeviceWeights& dw, const std::string& prefix);
+// 分開存放的 gate/proj 串流時在槽內沿輸出列接合（位元組相接，與 make_linear_concat 相同）。
+Linear make_linear_streamed_concat(DeviceWeights& dw, const std::string& prefix,
+                                   const std::string& first, const std::string& second);
 
 class BlockStreamer {
  public:
@@ -37,7 +40,7 @@ class BlockStreamer {
  private:
   struct Block {
     std::vector<Linear*> linears;
-    std::vector<const WeightRef*> refs;
+    std::vector<std::vector<const WeightRef*>> refs;  // 每個線性層的來源（接合層有兩份）
     std::vector<size_t> raw_offs, q_offs;  // 塊內偏移：原始資料／量化資料（sf、amax 緊接在 q 後）
     size_t raw_bytes = 0, q_bytes = 0;
   };

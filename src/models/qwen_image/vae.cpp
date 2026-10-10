@@ -288,12 +288,15 @@ void QwenImageVae::decode(Ctx& c,const float* z,int64_t H,int64_t W,std::vector<
   rgba.resize(count*256*4);
   MX_CUDA(cudaMemcpyAsync(rgba.data(),output,rgba.size(),cudaMemcpyDeviceToHost,c.stream)); c.sync();
 }
+size_t QwenImageVae::encode_act_bytes(int64_t h,int64_t w) const {
+  size_t count=size_t(h)*w; return count*96*5*2+count*4+kWorkspace+8192;
+}
 void QwenImageVae::encode(Ctx& c,const uint8_t* rgba,int64_t h,int64_t w,float* z) {
   MX_CHECK(rgba && z && h>0 && w>0 && h%16==0 && w%16==0,"VAE encode 需要 RGBA 指標及 16 倍數尺寸");
   pixels(h/16,w/16);
   MX_CHECK(c.device==impl_->device,"VAE encode GPU 不正確");
+  MX_CHECK(c.act.capacity()-c.act.used()>=encode_act_bytes(h,w),"VAE encode Arena 空間不足");
   size_t count=size_t(h)*w,n=count*96;
-  MX_CHECK(c.act.capacity()-c.act.used()>=n*5*2+count*4+kWorkspace+8192,"VAE encode Arena 空間不足");
   c.use(); ArenaScope scope(c.act); Pool p(c,n);
   auto* input=c.act.alloc_n<uint8_t>(count*4);
   MX_CUDA(cudaMemcpyAsync(input,rgba,count*4,cudaMemcpyHostToDevice,c.stream));

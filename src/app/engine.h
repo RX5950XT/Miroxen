@@ -16,6 +16,7 @@ struct LoraSpec {
 };
 
 struct ImageRequest {
+  std::string model = "qwen-image-2.1";  // 或 "qwen-image-2.1-turbo"（8 步蒸餾版，固定排程）
   std::string prompt;
   std::string negative_prompt;  // 只有 cfg_scale > 1 時使用
   int width = 1024, height = 1024;  // 有參考圖時 0 = 依最後一張參考圖的比例（約 1024² 像素）
@@ -29,6 +30,10 @@ struct ImageRequest {
   std::vector<float> sigmas;    // 選填：自訂未位移的 sigma 節點（遞減、首項 1），步數 = 節點數
   std::map<std::string, std::string> model_files;  // 已安裝的模型檔 ID，由 /v1/models 提供
 };
+
+constexpr const char* kQwenTurboId = "qwen-image-2.1-turbo";
+// Qwen-Image-2.1-Turbo 的 sample_sigmas（model_index.json，scheduler shift 1，原值直接用，不含最後的 0）。
+const std::vector<float>& qwen_turbo_sigmas();
 
 // MiniMax-H3 Ref2VA 參考（依提示詞裡 <Picture i>／<Video k>／<Audio j> 的順序）。
 struct MediaRef {

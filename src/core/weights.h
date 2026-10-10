@@ -76,6 +76,7 @@ struct Linear {
   int64_t in = 0, out = 0;
   std::vector<std::shared_ptr<LoraDelta>> loras;
   std::shared_ptr<QWeight> qw;  // 非空時走區塊縮放 GEMM
+  std::vector<std::string> sources;  // 串流時沿輸出列依序接合的來源張量；空 = name.weight
   explicit operator bool() const { return w.p != nullptr || qw != nullptr; }
 };
 

@@ -67,3 +67,19 @@ LoRA 很多（Turbo/加速、風格、NSFW），格式以 diffusers/PEFT 與 Com
 3. **雙卡異質分工**：5060 Ti 跑 DiT；3060 Ti 跑文字編碼器與 VAE，伺服器模式下可與下一個請求重疊。
 4. **模型專屬最佳化**：Qwen-Image prefix KV cache、H3 AdaLN 一次預算、融合 norm+調變、qk-norm+RoPE。
 5. 後續：sm_120 FP8 GEMM／FP8 注意力（需量測畫質）。
+
+## 5. Open-VC Attention 能否套用（2026-10-11）
+
+來源：[MachGen 技術文章](https://www.machgen.ai/blog/open-vc-attn)、[GitHub](https://github.com/MachGen/open-vc-attention)（BSD-3）。
+
+- **是什麼**：稠密（非稀疏）FP8 前向注意力，以 FlashAttention-4 的 CuTe DSL 實作。重點是 ExpCast（一個 FMA 直接算出 FP8 機率碼，略過 MUFU 指數與 FP32→FP8 轉換）、Q/K 每 128 列一個縮放、分母與分子用同一份解碼後機率、從對角線附近開始掃 key、選用的 V 殘差修補（ρ=0.5%）。
+- **實測對象**：只有 MiniMax-H3（73,397 token、56 頭、D=128），B200 上注意力約為 BF16 FA4 的 2 倍，相對誤差約 3%。
+- **不能直接用**：只支援 B200／B300（SM100／SM103）、Linux、Python + PyTorch cu130；快速路徑要 ≥32,768 token。本機 5060 Ti 是 SM120、3060 Ti 是 SM86，Windows 原生 C++ 引擎也不帶 PyTorch。
+- **想法能不能移植**：Miroxen 已有同類路線的 FP8 注意力（INT8 Q·K + 區塊縮放 FP8 P·V，sm_120a，16k token 約 105 TFLOPS）。ExpCast 解決的是 B200「tensor core 遠快於指數單元」的瓶頸；5060 Ti 的 MUFU 指數吞吐換算約 700 TFLOPS 等效，遠高於 MMA 實測上限 180，先前也實測過改指數／整數轉換沒有收益（見 tasks/lessons.md），因此不移植 ExpCast。對角線起掃只是配合 ExpCast 沒有指數餘裕的設計，對一般 online softmax 無益。
+- **可留意**：「分母用解碼後的 FP8 機率」與「V 殘差修補」是精度改善，不是加速；目前 FP8 注意力誤差在可接受範圍，沒有畫質問題需要它解決，暫不實作。若之後 720p／10 秒影片（約 7 萬 token、注意力占每步大半）出現 FP8 注意力的畫質問題，再從這兩點著手。
+
+## 6. 單卡 8 GB／16 GB 配置（2026-10-11）
+
+- `--gpus` 指定可見的卡；Qwen 圖片依剩餘顯存決定：雙卡維持 DiT 常駐＋副卡編碼器；單卡先把只跑一次的文字編碼器改逐層串流，仍放不下（8 GB）才把 DiT 也串流。串流沿用 H3 的 BlockStreamer，並支援分開存放的 gate/proj 在槽內接合。
+- H3 影片：單卡時取樣前若剩餘顯存不足，先卸下影片／音訊 VAE、視覺塔與編碼器暫存，解碼時再載回；8 GB 以下的單卡另把 VAE 解碼器線性層存成 Q8_0（權重 4.8→2.5 GB），用到才還原 bf16。
+- 教訓：Windows WDDM 顯存超用不會報 OOM，而是溢出到系統記憶體、速度掉 10～20 倍（8 GB 卡 864×480 影片解碼 262 秒 → 17 秒）。單卡配置要主動卸載，不能等錯誤。

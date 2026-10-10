@@ -306,6 +306,7 @@ summary { padding: .3rem 0; min-height: 36px; font-weight: 550; }
 .lora label { flex-wrap: wrap; gap: .35rem; }
 .lora .name { white-space: normal; overflow-wrap: anywhere; flex: 1; }
 .lora small { display: block; flex-basis: 100%; padding-left: 1.5rem; color: var(--ink-muted); }
+.lora label:only-child { grid-column: 1 / -1; }
 .lora input[type="checkbox"] { accent-color: var(--accent); width: 18px; height: 18px; min-height: 18px; }
 .ref-list li > span { min-width: 0; overflow-wrap: anywhere; }
 .ref-thumb { width: 44px; height: 44px; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
@@ -386,3 +387,34 @@ pre { background: var(--surface); border: 1px solid var(--line); padding: 1rem; 
 #lan-api-example { overflow-wrap: anywhere; }
 @media (max-width: 900px) { .utility-columns { grid-template-columns: minmax(0, 1fr); gap: .75rem; } }
 @media (max-width: 780px) { #model-manager { inset: 7rem 0 auto; } .top-meta { gap: .5rem; } .utility-page { padding: 1rem; } }
+
+/* 2026-10-11：生圖模型卡、顯示卡配置、社群 LoRA 安裝、瀏覽器原生表面 */
+::selection { background: color-mix(in oklch, var(--accent) 32%, transparent); color: var(--ink); }
+html { scrollbar-color: var(--line) transparent; accent-color: var(--accent); }
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+button, .modes button, .sizes button, .field textarea, .field input[type="number"], .field input[type="text"], .field select, .drop { border-radius: 8px; }
+.model-pick { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.pick { position: relative; display: grid; gap: .2rem; padding: .7rem .85rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); cursor: pointer; transition: border-color 160ms ease-out, background-color 160ms ease-out; }
+.pick input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.pick:hover { border-color: var(--ink-muted); }
+.pick:has(input:checked) { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 12%, var(--surface)); box-shadow: inset 0 0 0 1px var(--accent); }
+.pick:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pick:has(input:disabled) { opacity: .5; cursor: not-allowed; }
+.pick-title { font-weight: 650; color: var(--ink); }
+.pick-meta { font-size: var(--fs-0); color: var(--ink-muted); line-height: 1.35; }
+.chip { font-size: var(--fs-0); padding: .2rem .6rem; border: 1px solid var(--line); border-radius: 999px; color: var(--ink-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.summary-meta { margin-left: .45rem; font-weight: 400; font-size: var(--fs-0); color: var(--ink-muted); font-variant-numeric: tabular-nums; }
+#steps:read-only { color: var(--ink-muted); background: var(--surface-2); }
+.lora-install { margin-top: .6rem; }
+.lora-install > summary { color: var(--accent); }
+.url-row { display: flex; gap: .4rem; margin-top: .6rem; }
+.url-row input { flex: 1; min-width: 0; min-height: 40px; padding: .45rem .55rem; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); }
+.url-row button { flex-shrink: 0; min-height: 40px; }
+.install-list { list-style: none; margin: .5rem 0 0; padding: 0; display: grid; gap: .35rem; }
+.install { display: grid; gap: .1rem; padding: .5rem .65rem; border-radius: 8px; background: var(--surface); font-size: var(--fs-0); }
+.install-name { color: var(--ink); overflow-wrap: anywhere; }
+.install-meta { color: var(--ink-muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.install.done .install-meta { color: var(--ok); }
+.install.failed .install-meta { color: var(--danger); }
+.lora:last-child { border-bottom: 0; }
+@media (max-width: 340px) { .model-pick { grid-template-columns: 1fr; } }

@@ -7,6 +7,7 @@
 #include "server/fake_engine.h"
 #include "server/image_io.h"
 #include "server/server.h"
+#include "server/server_internal.h"
 
 #include <chrono>
 #include <cstring>
@@ -163,12 +164,12 @@ void test_meta_and_static(httplib::Client& cli) {
   check(models && models->status == 200, "models 狀態");
   auto mj = parse_body(models);
   check(mj.value("object", "") == "list", "models object");
-  check(mj["data"].size() == 2, "應有兩個模型");
+  check(mj["data"].size() == 3, "應有三個模型（標準圖、影音、Turbo 圖）");
   bool saw_image = false, saw_video = false;
   for (auto& m : mj["data"]) {
     check(m.value("object", "") == "model", "model object");
     check(m.value("owned_by", "") == "miroxen", "owned_by");
-    check(m.value("loaded", false), "假引擎模型應已載入");
+    check(m.value("loaded", false) || m.value("id", "") == "qwen-image-2.1-turbo", "假引擎模型應已載入");
     if (m.value("id", "") == "qwen-image-2.1" && m.value("kind", "") == "image") saw_image = true;
     if (m.value("id", "") == "minimax-h3" && m.value("kind", "") == "video") saw_video = true;
   }
@@ -215,6 +216,8 @@ void test_model_control(httplib::Client& cli) {
   check(!unloaded["data"][0]["loaded"].get<bool>() && !unloaded["data"][1]["loaded"].get<bool>(), "卸載所有模型");
   auto loaded = parse_body(post_json(cli, "/v1/models/load", {{"model", "qwen-image-2.1"}}));
   check(loaded["data"][0]["loaded"].get<bool>() && !loaded["data"][1]["loaded"].get<bool>(), "手動載入圖片模型");
+  loaded = parse_body(post_json(cli, "/v1/models/load", {{"model", "qwen-image-2.1-turbo"}}));
+  check(!loaded["data"][0]["loaded"].get<bool>() && loaded["data"][2]["loaded"].get<bool>(), "切換到 Turbo 生圖模型");
   loaded = parse_body(post_json(cli, "/v1/models/load", {{"model", "minimax-h3"}}));
   check(!loaded["data"][0]["loaded"].get<bool>() && loaded["data"][1]["loaded"].get<bool>(), "切換影音卸載圖片");
   auto body = image_body(); body["type"] = "image"; body["steps"] = 200;
@@ -265,6 +268,12 @@ void test_validation(httplib::Client& cli) {
   sig["sigmas"] = json::array({1.0, 1.5});
   expect_code(post_json(cli, "/v1/images/generations", sig), 400, "invalid_sigmas");
   auto autosize = image_body();
+  auto turbo = image_body();
+  turbo["model"] = "qwen-image-2.1-turbo";  // Turbo 固定 8 步；未給 steps 時自動用 8
+  expect_code(post_json(cli, "/v1/images/generations", turbo), 400, "invalid_steps");
+  turbo.erase("steps");
+  auto turbo_ok = post_json(cli, "/v1/images/generations", turbo);
+  check(turbo_ok && turbo_ok->status == 200, "Turbo 省略 steps 時用 8 步");
   autosize["size"] = "auto";  // 沒有參考圖時不能 auto
   expect_code(post_json(cli, "/v1/images/generations", autosize), 400, "invalid_size");
   bad_size["size"] = "272x256";  // 16 的倍數但不是 32 的倍數
@@ -458,6 +467,43 @@ void test_auth_and_limit(const TempTree& tree) {
   expect_code(big.cli->Post("/v1/jobs", payload, "application/json"), 413, "payload_too_large");
 }
 
+// 最小的 safetensors：一個 F32 [1,4] 張量。
+std::string tiny_safetensors(const std::string& key) {
+  const std::string header = "{\"" + key + "\":{\"dtype\":\"F32\",\"shape\":[1,4],\"data_offsets\":[0,16]}}";
+  uint64_t len = header.size();
+  std::string out(reinterpret_cast<const char*>(&len), 8);
+  return out + header + std::string(16, '\0');
+}
+
+void test_lora_install(const TempTree& tree, httplib::Client& cli) {
+  auto upload = [&](const std::string& name, const std::string& body) {
+    return cli.Post("/v1/loras/upload?name=" + name, body, "application/octet-stream");
+  };
+  auto ok = upload("community.safetensors", tiny_safetensors("transformer_blocks.0.attn.to_q.lora_A.weight"));
+  check(ok && ok->status == 201, "上傳圖片 LoRA");
+  check(parse_body(ok).value("model", "") == "qwen-image-2.1", "自動判斷為圖片 LoRA");
+  check(fs::exists(tree.root / "lora" / "image" / "community.safetensors"), "放進 image 子目錄");
+  auto video = upload("motion.safetensors", tiny_safetensors("transformer.blocks.0.attn.qkv_proj.lora_A.weight"));
+  check(video && video->status == 201 && fs::exists(tree.root / "lora" / "video" / "motion.safetensors"), "影片 LoRA 放進 video");
+  expect_code(upload("community.safetensors", tiny_safetensors("transformer_blocks.0.attn.to_q.lora_A.weight")), 400, "lora_exists");
+  expect_code(upload("junk.safetensors", "not-a-safetensors"), 400, "unsupported_lora");
+  expect_code(upload("..%2Fx.safetensors", tiny_safetensors("transformer_blocks.0.lora_A.weight")), 400, "invalid_lora");
+  expect_code(upload("model.gguf", "x"), 400, "invalid_lora");
+  check(!fs::exists(tree.root / "lora" / "junk.safetensors") && !fs::exists(tree.root / "lora" / "image" / "junk.safetensors"),
+        "失敗的上傳不留檔");
+  for (const char* url : {"http://huggingface.co/a/b/resolve/main/x.safetensors", "https://github.com/x/y.safetensors",
+                          "https://huggingface.co/a/b/resolve/main/x.bin", "https://civitai.com/user/x",
+                          "https://huggingface.co/a/b/resolve/main/x y.safetensors"})
+    expect_code(post_json(cli, "/v1/loras/install", {{"url", url}}), 400, "invalid_url");
+  check(mx::normalize_lora_url("https://huggingface.co/o/r/blob/main/s.safetensors") ==
+            "https://huggingface.co/o/r/resolve/main/s.safetensors", "HF blob 轉 resolve");
+  check(mx::normalize_lora_url("https://civitai.com/models/12/name?modelVersionId=34") ==
+            "https://civitai.com/api/download/models/34", "Civitai 版本網址");
+  check(mx::normalize_lora_url("https://civitai.com/models/12/name") == "https://civitai.com/api/v1/models/12", "Civitai 模型頁");
+  auto list = parse_body(cli.Get("/v1/loras/installs"));
+  check(list["data"].is_array(), "安裝清單");
+}
+
 void run_all() {
   TempTree tree;
   Running main_server(tree.opt("out"));
@@ -470,6 +516,7 @@ void run_all() {
   fs::remove(tree.root / "lora" / "image" / "duplicate.safetensors");
   fs::remove(tree.root / "lora" / "video" / "duplicate.safetensors");
   test_image_and_jobs(*main_server.cli);
+  test_lora_install(tree, *main_server.cli);
   test_auth_and_limit(tree);
 }
 

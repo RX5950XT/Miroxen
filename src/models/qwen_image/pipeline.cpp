@@ -14,9 +14,15 @@ namespace mx {
 static const char* kSysPrompt = "Comprehend and analyze the provided prompt.";
 
 std::vector<float> qwen_image_sigmas(int steps, int64_t image_tokens, bool shift_terminal,
-                                     const std::vector<float>& nodes) {
+                                     const std::vector<float>& nodes, bool raw) {
   if (!nodes.empty()) steps = int(nodes.size());
   MX_CHECK(steps >= 1, "steps 必須 >= 1");
+  if (raw) {
+    MX_CHECK(!nodes.empty(), "raw 排程需要 sigma 節點");
+    std::vector<float> out(nodes);
+    out.push_back(0.f);
+    return out;
+  }
   // scheduler_config：base_image_seq_len 256、max_image_seq_len 8192、base_shift 0.5、max_shift 0.9
   const double m = (0.9 - 0.5) / (8192.0 - 256.0), b = 0.5 - m * 256.0;
   const double mu = double(image_tokens) * m + b, emu = std::exp(mu);
@@ -50,53 +56,69 @@ static int pick_text_device(int requested, size_t te_bytes) {
   return fr > te_bytes + (size_t(1) << 30) ? 1 : 0;
 }
 
+static size_t store_bytes(const TensorStore& st) {
+  size_t n = 0;
+  for (auto& name : st.names()) n += st.get(name).nbytes;
+  return n;
+}
+
 QwenImagePipeline::QwenImagePipeline(const QwenImagePaths& p, QwenImageDevices d)
     : paths_(p), dev_(d) {
   tok_ = Tokenizer::load(p.tokenizer);
   te_st_.add_file(p.text_encoder, "\x01");
   dit_st_.add_file(p.dit);
   vae_st_.add_file(p.vae);
-  size_t te_bytes = 0;
-  for (auto& n : te_st_.names()) te_bytes += te_st_.get(n).nbytes;
+  const size_t te_bytes = store_bytes(te_st_), dit_bytes = store_bytes(dit_st_);
   dev_.text = pick_text_device(d.text, te_bytes);
+  // 單卡（或副卡放不下編碼器）時依剩餘顯存決定串流：先串流只跑一次的文字編碼器，仍不夠才串流 DiT。
+  // 預留給 1024² 啟用值、VAE 權重與解碼、編輯用視覺塔。
+  size_t free0 = 0, total0 = 0;
+  MX_CUDA(cudaSetDevice(dev_.dit));
+  MX_CUDA(cudaMemGetInfo(&free0, &total0));
+  const size_t reserve = size_t(3584) << 20;
+  const bool shared = dev_.text == dev_.dit;
+  const bool te_stream = shared && free0 < dit_bytes + te_bytes + reserve;
+  const bool dit_stream = free0 < dit_bytes + (shared && !te_stream ? te_bytes : 0) + reserve;
+  compact_ = shared;
 
-  te_ = std::make_unique<Qwen3TextEncoder>(te_st_, dev_.text);
+  te_ = std::make_unique<Qwen3TextEncoder>(te_st_, dev_.text, te_stream);
   te_ctx_ = std::make_unique<Ctx>(dev_.text, size_t(512) << 20, te_->scratch_bytes() * 2);
-  dit_ = std::make_unique<QwenImageDit>(dit_st_, dev_.dit, d.compute);
+  dit_ = std::make_unique<QwenImageDit>(dit_st_, dev_.dit, d.compute, dit_stream);
   vae_ = std::make_unique<QwenImageVae>(vae_st_, dev_.vae);
   latent_stats_ = DevBuf(128 * sizeof(float), dev_.vae);
   MX_CUDA(cudaSetDevice(dev_.vae));
   MX_CUDA(cudaMemcpy(latent_stats_.get(), QwenImageVae::latents_mean(), 64 * sizeof(float), cudaMemcpyHostToDevice));
   MX_CUDA(cudaMemcpy(latent_stats_.as<float>() + 64, QwenImageVae::latents_std(), 64 * sizeof(float), cudaMemcpyHostToDevice));
 
-  // 最大解析度 2752×1536（16512 token）+ 2048 文字 token 的啟用值上限；編輯時依參考圖再放大。
-  ensure_dit_ctx(16512 + 2048);
+  // 雙卡：最大解析度 2752×1536（16512 token）+ 2048 文字 token 的啟用值上限；單卡先配 1024²，按需放大。
+  ensure_dit_ctx((compact_ ? 4096 : 16512) + 2048);
   vae_ctx_ = dev_.vae == dev_.dit
                  ? nullptr
                  : std::make_unique<Ctx>(dev_.vae, vae_->decode_act_bytes(96, 172), 0);
 
   std::string sys = std::string("<|im_start|>system\n") + kSysPrompt + "<|im_end|>\n";
   drop_idx_ = int(tok_->encode(sys).size());
-  MX_INFO("Qwen-Image 管線就緒：DiT@GPU%d、文字編碼器@GPU%d、VAE@GPU%d", dev_.dit, dev_.text,
-          dev_.vae);
+  MX_INFO("Qwen-Image 管線就緒：DiT@GPU%d%s、文字編碼器@GPU%d%s、VAE@GPU%d（GPU%d 可用 %.1f GiB）", dev_.dit,
+          dit_stream ? "（串流）" : "", dev_.text, te_stream ? "（串流）" : "", dev_.vae, dev_.dit, free0 / 1073741824.0);
 }
 
 QwenImagePipeline::~QwenImagePipeline() = default;
 
-void QwenImagePipeline::ensure_dit_ctx(int64_t rows) {
+void QwenImagePipeline::ensure_dit_ctx(int64_t rows, size_t min_bytes) {
   const auto& c = dit_->cfg();
   size_t act = size_t(rows) * (c.dim * 4 + 5 * c.dim * 2 + 3 * c.ffn * 2) + (size_t(64) << 20);
   if (dit_->compute() != QMode::BF16) act += size_t(rows) * c.ffn * 9 / 8;  // 啟用值量化暫存
+  act = std::max(act, min_bytes);
   if (dit_ctx_ && dit_ctx_->act.capacity() >= act) return;
   dit_ctx_.reset();
   dit_ctx_ = std::make_unique<Ctx>(dev_.dit, act, dit_->scratch_bytes());
 }
 
 std::string QwenImagePipeline::describe() const {
-  return strf("DiT %s/%s @GPU%d (%.1f GiB) · TE %d 層 @GPU%d (%.1f GiB) · VAE @GPU%d",
+  return strf("%sDiT %s/%s @GPU%d%s (%.1f GiB) · TE %d 層 @GPU%d%s (%.1f GiB) · VAE @GPU%d", paths_.turbo ? "Turbo · " : "",
               gtype_name(dit_st_.get("transformer_blocks.0.attn.to_q.weight").type), qmode_name(dit_->compute()), dev_.dit,
-              dit_->weight_bytes() / 1073741824.0, te_->layers(), dev_.text,
-              te_->weight_bytes() / 1073741824.0, dev_.vae);
+              dit_->streaming() ? "（串流）" : "", dit_->weight_bytes() / 1073741824.0, te_->layers(), dev_.text,
+              te_->streaming() ? "（串流）" : "", te_->weight_bytes() / 1073741824.0, dev_.vae);
 }
 
 std::vector<bf16> QwenImagePipeline::encode_prompt(const std::string& prompt, int64_t& T,
@@ -222,6 +244,8 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
   // 參考圖 latent：VAE 取分佈平均，(z − mean) / std，排成 [H·W, 64]。
   std::vector<DevBuf> cond_dev;
   int64_t cond_rows = 0;
+  if (!vae_ctx_)  // 同卡：VAE 編碼共用 DiT 的啟用值 Arena
+    for (auto& ref : refs) ensure_dit_ctx(0, vae_->encode_act_bytes(ref.h, ref.w) + size_t(ref.h / 16) * (ref.w / 16) * C * 4);
   for (auto& ref : refs) {
     Ctx& vc = vae_ctx_ ? *vae_ctx_ : *dit_ctx_;
     vc.use();
@@ -240,7 +264,7 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
     cond_rows += n;
   }
   timer.mark("vae_encode");
-  ensure_dit_ctx(T + cond_rows + N);
+  ensure_dit_ctx(T + cond_rows + N, vae_ctx_ ? 0 : vae_->decode_act_bytes(H, W) + (size_t(64) << 20));
   Ctx& c = *dit_ctx_;
   c.use();
   auto conds_for = [&](const std::vector<int64_t>& sl) {
@@ -273,7 +297,8 @@ ImageResult QwenImagePipeline::generate(const ImageRequest& r, const ProgressFn&
   if (cfg) nvel = DevBuf(noise.size() * 4, c.device);
   MX_CUDA(cudaMemcpy(lat.get(), noise.data(), noise.size() * 4, cudaMemcpyHostToDevice));
 
-  auto sig = qwen_image_sigmas(r.steps, N, r.shift_terminal, r.sigmas);
+  auto sig = paths_.turbo ? qwen_image_sigmas(0, N, false, r.sigmas.empty() ? qwen_turbo_sigmas() : r.sigmas, true)
+                          : qwen_image_sigmas(r.steps, N, r.shift_terminal, r.sigmas);
   const int steps = int(sig.size()) - 1;
   c.sync();
   timer.mark("dit_prepare");

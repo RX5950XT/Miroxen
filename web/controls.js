@@ -49,19 +49,23 @@ function updateTasks() {
   $("mask-help").hidden = $("image-task").value !== "mask";
   $("steps").min = image ? "1" : "2";
   $("task-help").textContent = IMAGE_TASK[$("image-task").value];
-  $("steps-help").textContent = image ? "自訂 sigma 優先於此步數。" : "實際計算 " + Math.max(0, Number($("steps").value) - 1) + " 次；8 步 LoRA 填 9。";
+  $("steps-help").textContent = !image ? "實際計算 " + Math.max(0, Number($("steps").value) - 1) + " 次；8 步 LoRA 填 9。"
+    : state.imageModel === TURBO_ID ? "Turbo 固定 8 步，不需調整。" : "自訂 sigma 優先於此步數。";
+  $("steps").readOnly = image && state.imageModel === TURBO_ID;
+  if (typeof updateAdvancedSummary === "function" && $("adv-summary")) updateAdvancedSummary();
   renderLoras(state.loraRows);
   updateDuration();
 }
 
 function visibleLoras() {
-  const model = modelId(state.mode), task = $("video-task").value;
+  const base = (id) => id.startsWith("qwen-image-2.1") ? "qwen-image-2.1" : id;  // Turbo 與標準共用 LoRA
+  const model = base(modelId(state.mode)), task = $("video-task").value;
   return state.loraRows.filter((row) => (row.model === "unknown" || row.model === model) &&
     (state.mode === "image" || row.task === "any" || row.task === task));
 }
 
 function selectedLoras() {
-  return visibleLoras().filter((row) => state.loraSelections[row.name]).map((row) => ({ name: row.name, scale: state.loraSelections[row.name].scale }));
+  return visibleLoras().filter((row) => state.loraSelections[row.name]).map((row) => ({ name: row.name, scale: row.purpose === "style" ? state.loraSelections[row.name].scale : 1 }));
 }
 
 function applyLoraPreset(row) {
@@ -73,13 +77,13 @@ function applyLoraPreset(row) {
     $("sigmas").value = (preset.sigmas || []).join(", ");
     $("shift-terminal").checked = preset.shift_terminal !== false;
   } else $("video-shift").value = String(preset.video_shift);
-  $("lora-help").textContent = "已套用加速設定：" + (state.mode === "video" ? preset.steps - 1 : preset.steps) + " 次計算。強度維持 1 最符合訓練設定。";
+  $("lora-help").textContent = "已套用作者建議設定：" + (state.mode === "video" ? preset.steps - 1 : preset.steps) + " 次計算。加速 LoRA 強度固定為 1。";
   updateTasks();
 }
 
 function clearAcceleration() {
   state.loraRows.filter((row) => row.purpose === "acceleration").forEach((row) => delete state.loraSelections[row.name]);
-  $("steps").value = STEP_DEFAULT[state.mode];
+  $("steps").value = stepDefault(state.mode);
   $("sigmas").value = "";
   $("shift-terminal").checked = true;
   $("video-shift").value = "12";
@@ -93,7 +97,7 @@ function renderLoras(rows) {
   if (!available.length) {
     const p = document.createElement("p");
     p.className = "muted";
-    p.textContent = rows.length ? "目前任務沒有相容的 LoRA。" : "尚無 LoRA。將檔案放進 models/loras，再按重新掃描。";
+    p.textContent = rows.length ? "目前任務沒有相容的 LoRA。" : "尚無 LoRA。可從下方安裝社群 LoRA。";
     box.append(p);
   }
   available.forEach((row) => {
@@ -105,7 +109,7 @@ function renderLoras(rows) {
     text.textContent = row.name.replace(/\.safetensors$/i, "");
     text.title = row.name;
     const tag = document.createElement("small");
-    tag.textContent = row.purpose === "acceleration" ? "加速" : row.purpose === "style" ? "畫風" : "用途待確認";
+    tag.textContent = row.purpose === "acceleration" ? "加速 · 強度固定 1" : row.purpose === "style" ? "畫風" : "用途待確認";
     lab.append(check, text, tag);
     const range = document.createElement("input"), scale = document.createElement("span");
     range.type = "range"; range.min = "0"; range.max = "2"; range.step = "0.05";
@@ -121,7 +125,7 @@ function renderLoras(rows) {
     check.addEventListener("change", () => {
       if (check.checked) {
         if (row.purpose === "acceleration") clearAcceleration();
-        state.loraSelections[row.name] = { scale: Number(range.value) };
+        state.loraSelections[row.name] = { scale: row.purpose === "style" ? Number(range.value) : 1 };
         applyLoraPreset(row);
       } else {
         delete state.loraSelections[row.name];
@@ -129,16 +133,17 @@ function renderLoras(rows) {
       }
       renderLoras(rows); updateTasks(); updateRequestPreview();
     });
-    line.append(lab, range, scale);
+    line.append(lab);
+    if (row.purpose === "style") line.append(range, scale);
     box.append(line);
   });
 }
 
 function renderModelFiles() {
-  const model = state.models.find((m) => m.kind === state.mode);
+  const model = state.models.find((m) => m.id === modelId(state.mode));
   if (!model) return;
-  $("current-model").textContent = model.id;
-  const signature = JSON.stringify([state.mode, model.files, model.defaults]);
+  $("current-model").textContent = (MODEL_NAME[model.id] || model.id) + (model.loaded ? " · 已載入" : " · 按需載入");
+  const signature = JSON.stringify([model.id, model.files, model.defaults]);
   if (signature === state.fileSignature) return;
   state.fileSignature = signature;
   const box = $("model-files");
@@ -153,8 +158,8 @@ function renderModelFiles() {
     choices.forEach((file) => {
       const option = document.createElement("option"); option.value = file; option.textContent = file; select.append(option);
     });
-    select.value = state.fileSelections[state.mode][role] || "";
-    select.addEventListener("change", () => { state.fileSelections[state.mode][role] = select.value; updateRequestPreview(); });
+    select.value = fileSelection(model.id)[role] || "";
+    select.addEventListener("change", () => { fileSelection(model.id)[role] = select.value; updateRequestPreview(); });
     label.append(select); box.append(label);
   });
 }
@@ -169,8 +174,10 @@ function requestSettings() {
   if (kind === "image") {
     body.cfg_scale = Number($("cfg").value);
     if ($("negative").value.trim()) body.negative_prompt = $("negative").value.trim();
-    body.shift_terminal = $("shift-terminal").checked;
-    if ($("sigmas").value.trim()) body.sigmas = $("sigmas").value.split(/[,，\s]+/).filter(Boolean).map(Number);
+    if (body.model !== TURBO_ID) {  // Turbo 用固定 8 步排程
+      body.shift_terminal = $("shift-terminal").checked;
+      if ($("sigmas").value.trim()) body.sigmas = $("sigmas").value.split(/[,，\s]+/).filter(Boolean).map(Number);
+    }
   } else {
     body.num_frames = Number($("frames").value);
     body.video_shift = Number($("video-shift").value);
@@ -178,7 +185,7 @@ function requestSettings() {
   }
   body.loras = selectedLoras();
   if ($("compute").value) body.compute = $("compute").value;
-  const files = Object.fromEntries(Object.entries(state.fileSelections[kind]).filter(([, name]) => name));
+  const files = Object.fromEntries(Object.entries(fileSelection(body.model)).filter(([, name]) => name));
   if (Object.keys(files).length) body.model_files = files;
   return body;
 }
@@ -233,6 +240,10 @@ function percent(value) { return Number.isFinite(value) ? value.toFixed(1) + "%"
 
 function renderSystem(data) {
   $("queue").textContent = "工作 " + data.queue_length;
+  const gpus = data.gpus || [], gb = (g) => Math.round(g.total / 1073741824);
+  $("gpu-chip").hidden = !gpus.length;
+  $("gpu-chip").textContent = gpus.length > 1 ? "雙卡 · " + gpus.map((g) => gb(g) + "G").join("＋") : gpus.length ? "單卡 · " + gb(gpus[0]) + " GB" : "";
+  $("gpu-chip").title = gpus.map((g) => "GPU " + g.index + " · " + g.name).join("\n");
   const host = data.host || {}, proc = data.process || {}, apiData = data.api || {};
   $("host-metrics").replaceChildren(metric("CPU 使用率", percent(host.cpu_percent)), metric("系統 RAM", bytes(host.ram_used) + " / " + bytes(host.ram_total)), metric("Miroxen RAM", bytes(proc.ram_used)), metric("Miroxen CPU", percent(proc.cpu_percent)));
   $("api-metrics").replaceChildren(metric("服務運行", Math.floor((apiData.uptime_seconds || 0) / 60) + " 分鐘"), metric("API 請求", String(apiData.requests || 0)), metric("錯誤回應", String(apiData.errors || 0)), metric("驗證", apiData.authentication ? "需要金鑰" : "未設金鑰"));
@@ -282,7 +293,7 @@ function renderNetwork(data) {
 
 function updateModelSummary() {
   const loaded = state.models.find((m) => m.loaded);
-  $("model-summary").textContent = state.modelChanging ? "模型切換中…" : loaded ? (loaded.kind === "image" ? "Qwen" : "H3") + " · 已載入" : "模型未載入";
+  $("model-summary").textContent = state.modelChanging ? "模型切換中…" : loaded ? (MODEL_NAME[loaded.id] || loaded.id) + " · 已載入" : "模型未載入";
   $("model-dot").classList.toggle("on", Boolean(loaded));
 }
 
@@ -300,8 +311,8 @@ async function controlModel(load) {
   updateModelActions(); setBusy(true); $("generate").disabled = true;
   $("model-action-status").textContent = load ? "載入中，請稍候…" : "卸載中…";
   try {
-    const kind = $("manage-model").value;
-    const body = { model: modelId(kind), model_files: Object.fromEntries(Object.entries(state.fileSelections[kind]).filter(([, name]) => name)) };
+    const id = $("manage-model").value;
+    const body = { model: id, model_files: Object.fromEntries(Object.entries(fileSelection(id)).filter(([, name]) => name)) };
     if ($("compute").value) body.compute = $("compute").value;
     renderModels(await api("/v1/models/" + (load ? "load" : "unload"), { method: "POST", timeout: 120000, headers: { "Content-Type": "application/json" }, body: JSON.stringify(load ? body : {}) }));
     $("model-action-status").textContent = load ? "已載入 " + body.model : "模型已卸載；下次生成會自動載入。";
@@ -309,7 +320,106 @@ async function controlModel(load) {
   finally { state.modelChanging = false; $("generate").disabled = false; setBusy(Boolean(state.activeId)); updateModelActions(); await refreshMeta(); }
 }
 
+function applyImageModel(id) {
+  const prev = state.imageModel, turbo = id === TURBO_ID;
+  state.imageModel = id;
+  if (Number($("steps").value) === (prev === TURBO_ID ? 8 : 40)) $("steps").value = String(stepDefault("image"));
+  if (turbo) { $("steps").value = "8"; $("cfg").value = "1"; $("sigmas").value = ""; }
+  $("steps").readOnly = turbo && state.mode === "image";
+  $("sched-wrap").hidden = turbo || state.mode !== "image";
+  state.fileSignature = "";
+  renderModelFiles(); updateTasks(); updateRequestPreview();
+}
+
+function updateAdvancedSummary() {
+  const seed = $("seed").value.trim();
+  const parts = [$("steps").value + " 步"];
+  if (state.mode === "image") parts.push("CFG " + $("cfg").value);
+  parts.push(seed === "-1" || !seed ? "隨機種子" : "種子 " + seed);
+  if ($("compute").value) parts.push($("compute").value.toUpperCase());
+  $("adv-summary").textContent = parts.join(" · ");
+}
+
+// ---- 社群 LoRA 安裝 ----
+const INSTALL_STATE = { queued: "排隊中", downloading: "下載中", installing: "驗證中", done: "已安裝", failed: "失敗" };
+
+function installRow(text, detail, kind) {
+  const li = document.createElement("li"), title = document.createElement("span"), meta = document.createElement("span");
+  li.className = "install " + (kind || "");
+  title.className = "install-name"; title.textContent = text;
+  meta.className = "install-meta"; meta.textContent = detail;
+  li.append(title, meta);
+  return li;
+}
+
+function mb(n) { return (n / 1048576).toFixed(n > 1048576 * 100 ? 0 : 1) + " MB"; }
+
+async function refreshInstalls() {
+  let data;
+  try { data = await api("/v1/loras/installs"); } catch (e) { return; }
+  const rows = (data && data.data) || [];
+  const box = $("lora-installs");
+  box.querySelectorAll(".install.remote").forEach((el) => el.remove());
+  rows.slice(0, 5).forEach((r) => {
+    const name = r.name || decodeURIComponent(r.url.split("/").pop().split("?")[0]) || r.url;
+    const detail = INSTALL_STATE[r.state] + (r.bytes ? " · " + mb(r.bytes) : "") + (r.model ? " · " + (r.model === "minimax-h3" ? "影片" : "圖片") : "") + (r.error ? " · " + r.error : "");
+    box.append(installRow(name, detail, "remote " + r.state));
+  });
+  const active = rows.some((r) => r.state === "queued" || r.state === "downloading" || r.state === "installing");
+  if (rows.some((r) => r.state === "done" && !state.loraRows.some((l) => l.name === r.name))) loadLoras();
+  if (active && !state.installPoll) state.installPoll = setInterval(refreshInstalls, 1500);
+  if (!active && state.installPoll) { clearInterval(state.installPoll); state.installPoll = null; }
+}
+
+async function installFromUrl() {
+  const url = $("lora-url").value.trim();
+  if (!url) { $("lora-help").textContent = "請先貼上網址。"; return; }
+  $("lora-url-install").disabled = true;
+  try {
+    await api("/v1/loras/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+    $("lora-url").value = "";
+    $("lora-help").textContent = "開始下載，完成後會自動出現在清單。";
+    await refreshInstalls();
+  } catch (e) { $("lora-help").textContent = e.message; }
+  finally { $("lora-url-install").disabled = false; }
+}
+
+function uploadLora(file) {
+  if (!file) return;
+  if (!/\.safetensors$/i.test(file.name)) { $("lora-help").textContent = "只接受 .safetensors 檔案。"; return; }
+  const row = installRow(file.name, "上傳 0%", "local"), meta = row.querySelector(".install-meta");
+  $("lora-installs").prepend(row);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/v1/loras/upload?name=" + encodeURIComponent(file.name));
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  if (state.apiKey) xhr.setRequestHeader("Authorization", "Bearer " + state.apiKey);
+  xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) meta.textContent = "上傳 " + Math.round(100 * ev.loaded / ev.total) + "% · " + mb(ev.loaded); };
+  xhr.onload = () => {
+    let data = null;
+    try { data = JSON.parse(xhr.responseText); } catch (e) { data = null; }
+    if (xhr.status === 201 && data) {
+      meta.textContent = "已安裝 · " + (data.model === "minimax-h3" ? "影片" : "圖片") + " · " + mb(data.size);
+      row.classList.add("done");
+      loadLoras();
+    } else {
+      meta.textContent = "失敗 · " + ((data && data.error && data.error.message) || "伺服器回應 " + xhr.status);
+      row.classList.add("failed");
+    }
+  };
+  xhr.onerror = () => { meta.textContent = "失敗 · 連線中斷"; row.classList.add("failed"); };
+  xhr.send(file);
+}
+
 function bindControls() {
+  document.querySelectorAll('input[name="image-model"]').forEach((radio) => radio.addEventListener("change", () => { if (radio.checked) applyImageModel(radio.value); }));
+  $("lora-url-install").addEventListener("click", installFromUrl);
+  $("lora-url").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); installFromUrl(); } });
+  $("lora-file").addEventListener("change", (ev) => { uploadLora(ev.target.files[0]); ev.target.value = ""; });
+  const ldrop = $("lora-drop");
+  ["dragenter", "dragover"].forEach((name) => ldrop.addEventListener(name, (ev) => { ev.preventDefault(); ldrop.classList.add("hot"); }));
+  ldrop.addEventListener("dragleave", () => ldrop.classList.remove("hot"));
+  ldrop.addEventListener("drop", (ev) => { ev.preventDefault(); ldrop.classList.remove("hot"); uploadLora(ev.dataTransfer.files[0]); });
+  $("lora-install").addEventListener("toggle", () => { if ($("lora-install").open) refreshInstalls(); });
   $("load-model").addEventListener("click", () => controlModel(true));
   $("unload-model").addEventListener("click", () => controlModel(false));
   document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
@@ -321,7 +431,7 @@ function bindControls() {
   $("clear-frames").addEventListener("click", () => { $("first-frame").value = ""; $("last-frame").value = ""; updateRequestPreview(); });
   $("duration").addEventListener("input", () => { const n = Number($("duration").value); if (Number.isFinite(n)) $("frames").value = Math.max(5, Math.ceil(n * 24)); updateDuration(); });
   $("frames").addEventListener("input", () => { $("duration").value = (Number($("frames").value) / 24).toFixed(2); updateDuration(); });
-  $("form").addEventListener("input", () => { updateRequestPreview(); $("steps-help").textContent = state.mode === "video" ? "實際計算 " + Math.max(0, Number($("steps").value) - 1) + " 次" : "自訂 sigma 優先於此步數。"; });
+  $("form").addEventListener("input", () => { updateRequestPreview(); updateAdvancedSummary(); });
   $("reload-loras").addEventListener("click", loadLoras);
   $("api-base").textContent = location.origin + "/v1";
   $("api-base").href = location.origin + "/v1/models";
@@ -336,5 +446,5 @@ function bindControls() {
     try { await copyText(JSON.stringify(await buildRequest(), null, 2)); $("copy-status").textContent = "已複製完整 JSON，可 POST 到 /v1/jobs。"; }
     catch (e) { $("copy-status").textContent = e.message || "複製失敗，請確認瀏覽器允許剪貼簿。"; }
   });
-  updateTasks(); updateRequestPreview();
+  updateTasks(); updateRequestPreview(); updateAdvancedSummary();
 }

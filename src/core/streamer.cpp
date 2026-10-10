@@ -21,6 +21,24 @@ Linear make_linear_streamed(DeviceWeights& dw, const std::string& prefix) {
   return l;
 }
 
+Linear make_linear_streamed_concat(DeviceWeights& dw, const std::string& prefix,
+                                   const std::string& first, const std::string& second) {
+  const WeightRef& a = dw.store().get(first + ".weight");
+  const WeightRef& b = dw.store().get(second + ".weight");
+  MX_CHECK(a.shape.size() == 2 && b.shape.size() == 2 && a.type == b.type && a.shape[1] == b.shape[1],
+           "%s：接合來源的型別或輸入維度不同", prefix.c_str());
+  MX_CHECK(!dw.store().has(first + ".bias") && !dw.store().has(second + ".bias"),
+           "%s：接合線性層不支援 bias", prefix.c_str());
+  Linear l;
+  l.name = prefix;
+  l.w.type = a.type;
+  l.w.shape = {a.shape[0] + b.shape[0], a.shape[1]};
+  l.out = l.w.shape[0];
+  l.in = l.w.shape[1];
+  l.sources = {first + ".weight", second + ".weight"};
+  return l;
+}
+
 BlockStreamer::~BlockStreamer() {
   if (blas_) cublasDestroy(blas_);
   if (copy_) {
@@ -44,9 +62,14 @@ static size_t qlayout(QMode m, const Linear& l, size_t& sf_off, size_t& amax_off
 void BlockStreamer::add_block(const TensorStore& st, std::vector<Linear*> linears) {
   Block b;
   for (Linear* l : linears) {
-    const WeightRef& r = st.get(l->name + ".weight");
+    std::vector<const WeightRef*> src;
+    size_t nbytes = 0;
+    for (const auto& name : l->sources.empty() ? std::vector<std::string>{l->name + ".weight"} : l->sources) {
+      src.push_back(&st.get(name));
+      nbytes += src.back()->nbytes;
+    }
     b.raw_offs.push_back(b.raw_bytes);
-    b.raw_bytes += align256(r.nbytes);
+    b.raw_bytes += align256(nbytes);
     if (mode_ != QMode::BF16) {
       MX_CHECK(l->in % 32 == 0, "%s：輸入維度不是 32 的倍數，無法量化成 %s", l->name.c_str(), qmode_name(mode_));
       size_t sf_off, amax_off;
@@ -56,7 +79,7 @@ void BlockStreamer::add_block(const TensorStore& st, std::vector<Linear*> linear
       l->qw = std::make_shared<QWeight>();
       l->qw->mode = mode_;
     }
-    b.refs.push_back(&r);
+    b.refs.push_back(std::move(src));
   }
   b.linears = std::move(linears);
   total_raw_ += b.raw_bytes;
@@ -97,10 +120,14 @@ void BlockStreamer::fill_stage(const Block& b, char* dst) {
     size_t n;
   };
   std::vector<Piece> pieces;
-  for (size_t j = 0; j < b.refs.size(); j++)
-    for (size_t o = 0; o < b.refs[j]->nbytes; o += kChunk)
-      pieces.push_back({static_cast<const char*>(b.refs[j]->data) + o, dst + b.raw_offs[j] + o,
-                        std::min(kChunk, b.refs[j]->nbytes - o)});
+  for (size_t j = 0; j < b.refs.size(); j++) {
+    size_t off = b.raw_offs[j];
+    for (const WeightRef* r : b.refs[j]) {
+      for (size_t o = 0; o < r->nbytes; o += kChunk)
+        pieces.push_back({static_cast<const char*>(r->data) + o, dst + off + o, std::min(kChunk, r->nbytes - o)});
+      off += r->nbytes;
+    }
+  }
   const int nt = int(std::min<size_t>(4, pieces.size()));
   std::vector<std::thread> pool;
   for (int t = 1; t < nt; t++)
@@ -128,7 +155,7 @@ void BlockStreamer::issue_copy(int i) {
     // 原始權重 → bf16 → 區塊縮放；與 c.stream 上的計算重疊。
     for (size_t j = 0; j < b.linears.size(); j++) {
       const Linear& l = *b.linears[j];
-      dequant_to_bf16(raw + b.raw_offs[j], b.refs[j]->type, l.in * l.out, tmp_.as<bf16>(), copy_);
+      dequant_to_bf16(raw + b.raw_offs[j], l.w.type, l.in * l.out, tmp_.as<bf16>(), copy_);
       const float one = 1.f;
       for (auto& d : l.loras) {  // W[out,in] += s·B·A（同 DeviceWeights::merge_loras）
         if (d->f32) continue;

@@ -1,7 +1,9 @@
 #pragma once
 // Qwen-Image-2.1 DiT（32 層 single-stream、共用調變、block-causal 注意力、prefix KV cache）。
+#include <memory>
 #include <vector>
 
+#include "core/streamer.h"
 #include "core/weights.h"
 
 namespace mx {
@@ -41,7 +43,9 @@ struct QwenImageSeq {
 class QwenImageDit {
  public:
   // compute：區塊內大矩陣的運算精度（FP8/FP4 需 sm_100+，不支援時退回 bf16）。
-  QwenImageDit(const TensorStore& st, int device, QMode compute = QMode::BF16);
+  // stream=true：區塊權重留在檔案（mmap），每層計算前才搬上 GPU（顯存不夠放整個 DiT 時用）。
+  QwenImageDit(const TensorStore& st, int device, QMode compute = QMode::BF16, bool stream = false);
+  bool streaming() const { return streamer_ != nullptr; }
   QMode compute() const { return compute_; }
   const QwenImageDitConfig& cfg() const { return cfg_; }
 
@@ -53,13 +57,14 @@ class QwenImageDit {
   void forward(Ctx& c, QwenImageSeq& seq, const float* latents, float t, float* v);
 
   size_t scratch_bytes() const;
-  size_t weight_bytes() const { return dw_.bytes(); }
+  size_t weight_bytes() const { return dw_.bytes() + (streamer_ ? streamer_->weight_bytes() : 0); }
   std::vector<Linear*> linears();
   std::vector<std::string> linear_names();
   // LoRA 名稱（diffusers / ComfyUI 命名）→ 目標層。
   bool resolve_lora(const std::string& name, LoraTarget& t);
   // 量化模式下把目前的 LoRA 併進權重（換 LoRA 時呼叫一次）。
   void merge_loras(Ctx& c) {
+    if (streamer_) return streamer_->invalidate();  // 串流槽在搬運時併入 LoRA
     for (Linear* l : linears()) dw_.merge_loras(c, *l);
   }
 
@@ -78,6 +83,7 @@ class QwenImageDit {
   Linear img_in_, txt_in1_, txt_in2_, t1_, t2_, modulation_, norm_out_, proj_out_;
   DevBuf txt_norm_w_;  // zero-centered → 已加 1
   std::vector<Block> blocks_;
+  std::unique_ptr<BlockStreamer> streamer_;
 };
 
 }  // namespace mx

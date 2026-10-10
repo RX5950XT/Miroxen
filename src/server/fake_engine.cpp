@@ -54,6 +54,7 @@ std::vector<ModelInfo> FakeEngine::models() {
   auto out = std::vector<ModelInfo>{
       {"qwen-image-2.1", "image", loaded_image_.load(), "fake"},
       {"minimax-h3", "video", loaded_video_.load(), "fake"},
+      {kQwenTurboId, "image", loaded_turbo_.load(), "fake"},
   };
   out[0].files = {{"dit", {"test-Q8_0.gguf", "test-Q4_K.gguf"}}, {"vae", {"test-vae.safetensors"}}};
   out[0].defaults = {{"dit", "test-Q8_0.gguf"}, {"vae", "test-vae.safetensors"}};
@@ -84,7 +85,7 @@ std::vector<GpuInfo> FakeEngine::gpus() {
 
 ImageResult FakeEngine::generate_image(const ImageRequest& r, const ProgressFn& cb,
                                        const std::atomic<bool>* cancel) {
-  load_model("qwen-image-2.1", {}, {});
+  load_model(r.model, {}, {});
   MX_CHECK(r.width > 0 && r.height > 0 && r.width <= 8192 && r.height <= 8192, "圖片尺寸不合法");
   auto t0 = std::chrono::steady_clock::now();
   simulate(cb, cancel, r.steps);

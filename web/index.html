@@ -12,9 +12,9 @@
       <button type="button" data-view="studio" aria-pressed="true">創作</button>
       <button type="button" data-view="api-panel" aria-pressed="false">API／硬體</button>
     </nav>
-    <div class="top-meta"><span id="connection" role="status">連線中</span><button type="button" id="model-toggle" popovertarget="model-manager" aria-label="模型狀態與管理"><span id="model-dot" class="dot"></span><span id="model-summary">模型狀態</span><span aria-hidden="true">▾</span></button><span id="queue" class="queue">佇列 —</span></div>
+    <div class="top-meta"><span id="connection" role="status">連線中</span><button type="button" id="model-toggle" popovertarget="model-manager" aria-label="模型狀態與管理"><span id="model-dot" class="dot"></span><span id="model-summary">模型狀態</span><span aria-hidden="true">▾</span></button><span id="gpu-chip" class="chip" hidden></span><span id="queue" class="queue">佇列 —</span></div>
   </header>
-    <div id="model-manager" popover aria-labelledby="model-manager-title"><div class="section-heading"><h2 id="model-manager-title">模型管理</h2><button type="button" popovertarget="model-manager" popovertargetaction="hide" aria-label="關閉模型管理">關閉</button></div><p class="help">只保留一顆模型。切換會釋放上一顆；卸載可收回記憶體。生成中不能操作。量化與運算精度沿用創作分頁。</p><label class="field">模型<select id="manage-model"><option value="image">Qwen-Image-2.1 · 圖片</option><option value="video">MiniMax-H3 · 影音</option></select></label><div class="actions"><button id="load-model" type="button">載入／切換</button><button id="unload-model" type="button">卸載模型</button></div><p id="model-action-status" class="help" role="status"></p><div id="models" class="models"></div></div>
+    <div id="model-manager" popover aria-labelledby="model-manager-title"><div class="section-heading"><h2 id="model-manager-title">模型管理</h2><button type="button" popovertarget="model-manager" popovertargetaction="hide" aria-label="關閉模型管理">關閉</button></div><p class="help">只保留一顆模型。切換會釋放上一顆；卸載可收回記憶體。生成中不能操作。量化與運算精度沿用創作分頁。</p><label class="field">模型<select id="manage-model"></select></label><div class="actions"><button id="load-model" type="button">載入／切換</button><button id="unload-model" type="button">卸載模型</button></div><p id="model-action-status" class="help" role="status"></p><div id="models" class="models"></div></div>
   <div id="studio" class="layout">
     <form id="form" class="controls" novalidate>
       <div class="section-heading"><h1>建立作品</h1><span id="current-model" class="muted"></span></div>
@@ -22,6 +22,10 @@
         <button type="button" id="mode-image" aria-pressed="true">圖片</button>
         <button type="button" id="mode-video" aria-pressed="false">影音</button>
       </div>
+      <fieldset id="image-models" class="model-pick"><legend class="sr-only">生圖模型</legend>
+        <label class="pick"><input type="radio" name="image-model" value="qwen-image-2.1" checked><span class="pick-title">標準</span><span class="pick-meta">40 步 · 細節與文字最穩</span></label>
+        <label class="pick"><input type="radio" name="image-model" value="qwen-image-2.1-turbo"><span class="pick-title">Turbo</span><span class="pick-meta">固定 8 步 · 約快 5 倍</span></label>
+      </fieldset>
       <label class="field" id="image-task-wrap">圖片任務
         <select id="image-task"><option value="generate">生成／編輯</option><option value="transparent">透明背景</option><option value="extract">擷取主體／去背</option><option value="mask">局部修改</option></select>
         <span id="task-help" class="help">加入參考圖即可編輯；不加參考圖則生成新圖。</span>
@@ -63,10 +67,16 @@
         <p id="duration-help" class="help"></p>
       </div>
       <section class="loras input-section" aria-label="LoRA"><div class="section-heading"><h2>LoRA</h2><button type="button" id="reload-loras">重新掃描</button></div>
-        <p class="help compact">勾選加速 LoRA 會套用對應排程；畫風可另疊加。強度 1 為原始設定。</p>
+        <p id="lora-intro" class="help compact">勾選後可調強度；影片加速 LoRA 會自動套用作者排程。</p>
         <div id="loras"></div><p id="lora-help" class="help compact" role="status"></p>
+        <details id="lora-install" class="lora-install"><summary>安裝社群 LoRA</summary>
+          <div class="drop" id="lora-drop"><label><input id="lora-file" class="file-input" type="file" accept=".safetensors">拖放 .safetensors 檔案，或按一下選擇</label></div>
+          <div class="url-row"><input id="lora-url" type="url" inputmode="url" placeholder="貼上 Hugging Face 或 Civitai 網址" aria-label="LoRA 下載網址"><button type="button" id="lora-url-install">下載</button></div>
+          <p class="help compact">伺服器會自動判斷是圖片或影片用，放進對應資料夾。Civitai 需要登入的模型，請在伺服器設定 CIVITAI_TOKEN。</p>
+          <ul id="lora-installs" class="install-list" aria-live="polite"></ul>
+        </details>
       </section>
-      <details class="input-section" open><summary>生成設定</summary>
+      <details class="input-section" id="advanced"><summary>進階設定 <span id="adv-summary" class="summary-meta"></span></summary>
         <div class="grid2">
           <label class="field">取樣步數<input id="steps" type="number" min="1" max="200" value="40"><span id="steps-help" class="help"></span></label>
           <label class="field" id="cfg-wrap">提示詞引導（CFG）<input id="cfg" type="number" min="0" max="20" step="0.1" value="1"></label>

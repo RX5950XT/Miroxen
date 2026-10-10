@@ -12,6 +12,7 @@ struct EngineConfig {
   std::string models_dir = "models";
   // Qwen-Image-2.1（相對於 models_dir；空字串用預設）
   std::string qi_dit, qi_te, qi_vae, qi_tok, qi_mmproj;
+  std::string qi_turbo_dit;  // Qwen-Image-2.1-Turbo（8 步蒸餾版），與標準版共用編碼器／VAE
   int qi_text_device = -1;  // -1 = 自動
   // MiniMax-H3
   std::string h3_dit, h3_te, h3_vvae, h3_avae, h3_tok, h3_dit_ref;

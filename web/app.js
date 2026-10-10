@@ -20,7 +20,9 @@ const VIDEO_SIZES = [
   ["自動", 0, 0],
   ["自訂", -1, -1],
 ];
-const STEP_DEFAULT = { image: 40, video: 30 };
+const TURBO_ID = "qwen-image-2.1-turbo";
+const MODEL_NAME = { "qwen-image-2.1": "Qwen 標準", [TURBO_ID]: "Qwen Turbo", "minimax-h3": "H3 影音" };
+function stepDefault(mode) { return mode === "video" ? 30 : state.imageModel === TURBO_ID ? 8 : 40; }
 const STATUS_TEXT = {
   queued: "排隊中",
   running: "生成中",
@@ -44,7 +46,8 @@ const state = {
   source: null,
   settled: false,
   histSig: "",
-  loraRows: [], loraSelections: {}, fileSelections: { image: {}, video: {} },
+  imageModel: "qwen-image-2.1",
+  loraRows: [], loraSelections: {}, fileSelections: {}, installPoll: null,
   fileSignature: "", apiKey: "", pollTimer: null, refreshing: false, submitting: false, authRequired: false, modelChanging: false,
 };
 
@@ -94,10 +97,10 @@ function readFile(file) {
 }
 
 function modelId(kind) {
-  const list = state.models.filter((m) => m.kind === kind);
-  const loaded = list.find((m) => m.loaded);
-  return (loaded || list[0] || {}).id || "";
+  if (kind === "image") return state.imageModel;
+  return (state.models.find((m) => m.kind === kind) || {}).id || "minimax-h3";
 }
+function fileSelection(id) { return state.fileSelections[id] || (state.fileSelections[id] = {}); }
 
 // 參考生成（Ref2VA）：依序的圖片／影片／音訊，標籤依種類各自編號（同提示詞裡的寫法）。
 const VREF_TAG = { image: "Picture", video: "Video", audio: "Audio" };
@@ -162,13 +165,14 @@ function applyMode() {
   const image = state.mode === "image";
   $("mode-image").setAttribute("aria-pressed", image ? "true" : "false");
   $("mode-video").setAttribute("aria-pressed", image ? "false" : "true");
+  $("image-models").hidden = !image;
   $("negative-wrap").hidden = !image;
   $("cfg-wrap").hidden = !image;
   $("refs-wrap").hidden = !image;
   $("frames-wrap").hidden = image;
   $("frame-files").hidden = image;
   $("shift-wrap").hidden = image;
-  $("sched-wrap").hidden = !image;
+  $("sched-wrap").hidden = !image || state.imageModel === TURBO_ID;
   $("vrefs-wrap").hidden = image;
   renderModelFiles();
   updateTasks();
@@ -180,7 +184,7 @@ function applyMode() {
 function setMode(mode) {
   if (state.mode === mode) return;
   const steps = Number($("steps").value);
-  if (steps === STEP_DEFAULT[state.mode]) $("steps").value = String(STEP_DEFAULT[mode]);
+  if (steps === stepDefault(state.mode)) $("steps").value = String(stepDefault(mode));
   state.mode = mode;
   clearAcceleration();
   state.size = 0;
@@ -396,7 +400,12 @@ function renderHistory() {
 function renderModels(data) {
   const previous = state.models.map((m) => m.id).join();
   state.models = (data && data.data) || [];
-  if (previous !== state.models.map((m) => m.id).join()) renderLoras(state.loraRows);
+  if (previous !== state.models.map((m) => m.id).join()) {
+    renderLoras(state.loraRows);
+    const select = $("manage-model"), keep = select.value;
+    select.replaceChildren(...state.models.map((m) => new Option(MODEL_NAME[m.id] || m.id, m.id)));
+    select.value = keep || modelId(state.mode);
+  }
   const box = $("models");
   box.replaceChildren();
   state.models.forEach((m) => {

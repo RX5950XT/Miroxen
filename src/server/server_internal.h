@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <map>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -112,6 +113,35 @@ std::string jobs_to_json(const std::vector<std::shared_ptr<Job>>& jobs);
 std::string image_sync_json(const Job& job);
 std::string models_json(const std::vector<ModelInfo>& models);
 std::string loras_json(const ServerOptions& opt);
+
+// ---- 社群 LoRA（lora_install.cpp）----
+bool lora_name_ok(const std::string& name);
+// 檔名 → 完整路徑（平面目錄與 image／video 子目錄；重名丟 ambiguous_lora）。
+std::map<std::string, std::filesystem::path> lora_files(const ServerOptions& opt);
+// 依 safetensors 張量名稱判斷："qwen-image-2.1"／"minimax-h3"；讀不到或認不出回空字串。
+std::string lora_model_kind(const std::filesystem::path& file);
+// 驗證暫存檔、判斷模型後移到 image／video 子目錄；回傳 /v1/loras 同格式的一列（JSON）。失敗會刪暫存檔並丟 ApiError。
+std::string install_lora_file(const ServerOptions& opt, const std::filesystem::path& part, const std::string& name);
+// Hugging Face（blob → resolve）與 Civitai（模型頁 → 下載 API）網址正規化；只接受 https 與這兩個網站。
+std::string normalize_lora_url(const std::string& url);
+
+// 背景下載（curl），一次一個網址；狀態放記憶體，重啟後清空。
+class LoraInstaller {
+ public:
+  explicit LoraInstaller(ServerOptions opt);
+  ~LoraInstaller();
+  std::string start(const std::string& url);  // 回傳該筆安裝的 JSON
+  std::string list_json();
+
+ private:
+  struct Item;
+  void run(std::shared_ptr<Item> item);
+  ServerOptions opt_;
+  std::mutex mu_;
+  std::vector<std::shared_ptr<Item>> items_;
+  std::vector<std::thread> threads_;
+  uint64_t next_ = 1;
+};
 std::string system_json(const std::vector<GpuInfo>& gpus, int queue_length, uint64_t requests = 0,
                         uint64_t errors = 0, double uptime = 0, bool authenticated = false);
 

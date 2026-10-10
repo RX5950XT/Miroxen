@@ -1,5 +1,7 @@
 #include "core/dequant.h"
 
+#include <cuda_fp16.h>
+
 #include <cstring>
 #include <limits>
 #include <type_traits>
@@ -206,7 +208,29 @@ template<GType T> void cpu(const uint8_t* src, int64_t n, float* dst) {
   for (int64_t b = 0; b < n / B; ++b)
     for (int k = 0; k < B; ++k) dst[b * B + k] = decode<T>(src + b * S, k);
 }
+__global__ void q8_0_kernel(const bf16* x, int64_t blocks, uint8_t* out) {
+  const int64_t b = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (b >= blocks) return;
+  float v[32], amax = 0.f;
+  for (int k = 0; k < 32; ++k) {
+    v[k] = __bfloat162float(x[b * 32 + k]);
+    amax = fmaxf(amax, fabsf(v[k]));
+  }
+  const float d = amax / 127.f, id = d > 0.f ? 1.f / d : 0.f;
+  const __half hd = __float2half(d);
+  uint8_t* o = out + b * 34;
+  memcpy(o, &hd, 2);
+  for (int k = 0; k < 32; ++k) o[2 + k] = uint8_t(int8_t(__float2int_rn(v[k] * id)));
+}
 }  // namespace
+
+void quantize_q8_0(const bf16* src, int64_t n, void* dst, cudaStream_t s) {
+  MX_CHECK(n % 32 == 0 && src && dst, "Q8_0 quantization needs n % 32 == 0");
+  const int64_t blocks = n / 32;
+  if (!blocks) return;
+  q8_0_kernel<<<unsigned((blocks + 255) / 256), 256, 0, s>>>(src, blocks, static_cast<uint8_t*>(dst));
+  MX_KCHECK();
+}
 
 bool dequant_supported(GType t) {
   switch (t) {

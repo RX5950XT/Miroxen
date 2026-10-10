@@ -10,6 +10,7 @@
 #include "server/image_io.h"
 #include "server/media_io.h"
 #include "kernels/ops.h"
+#include "kernels/h3_latent.h"
 #include "core/timing.h"
 
 namespace mx {
@@ -55,9 +56,7 @@ H3Pipeline::H3Pipeline(const H3Paths& p, H3Devices d) : paths_(p), dev_(d) {
   te_ = std::make_unique<Qwen3TextEncoder>(te_st_, dev_.text, /*stream=*/true);
   te_ctx_ = std::make_unique<Ctx>(dev_.text, size_t(512) << 20, te_->scratch_bytes());
   dit_ = std::make_unique<H3Dit>(dit_st_, dev_.dit, 0, d.compute);
-  vvae_ = std::make_unique<H3VideoVae>(vvae_st_, dev_.video_vae, d.compute);
-  avae_ = std::make_unique<H3AudioVae>(avae_st_, dev_.audio_vae);
-  avae_ctx_ = std::make_unique<Ctx>(dev_.audio_vae, size_t(1) << 30, 0);
+  ensure_vaes();
   MX_INFO("MiniMax-H3 管線就緒：DiT@GPU%d（串流）、文字編碼器@GPU%d（串流）、影片 VAE@GPU%d、音訊 VAE@GPU%d",
           dev_.dit, dev_.text, dev_.video_vae, dev_.audio_vae);
 }
@@ -69,6 +68,28 @@ std::string H3Pipeline::describe() const {
               ref_active_ ? "Ref2VA" : "FL2VA",
               gtype_name((ref_active_ ? dit_ref_st_ : dit_st_).get("blocks.0.attn.qkv_proj.weight").type), qmode_name(dit_->compute()), dev_.dit,
               te_->layers(), dev_.text);
+}
+
+void H3Pipeline::ensure_vaes() {
+  if (!vvae_) {
+    // 全部擠在一張小卡（< 12 GiB）時，VAE 解碼器存 Q8_0，取樣後才放得下。
+    size_t free = 0, total = 0;
+    MX_CUDA(cudaSetDevice(dev_.video_vae));
+    MX_CUDA(cudaMemGetInfo(&free, &total));
+    const bool compact = dev_.video_vae == dev_.dit && dev_.text == dev_.dit && total < (size_t(12) << 30);
+    vvae_ = std::make_unique<H3VideoVae>(vvae_st_, dev_.video_vae, dev_.compute, compact);
+  }
+  if (!avae_) avae_ = std::make_unique<H3AudioVae>(avae_st_, dev_.audio_vae);
+  if (!avae_ctx_) avae_ctx_ = std::make_unique<Ctx>(dev_.audio_vae, size_t(1) << 30, 0);
+}
+
+void H3Pipeline::release_aux() {
+  vvae_.reset();
+  avae_ctx_.reset();
+  avae_.reset();
+  vis_ctx_.reset();
+  vis_.reset();
+  te_ctx_.reset();
 }
 
 void H3Pipeline::ensure_dit(bool ref) {
@@ -137,7 +158,7 @@ std::vector<bf16> H3Pipeline::encode_prompt(const std::vector<Piece>& pieces, co
   }
   text(prompt.empty() ? " " : prompt);
   const int64_t T = int64_t(ids.size()), td = te_->dim();
-  if (te_ctx_->act.capacity() < te_->act_bytes(T)) {
+  if (!te_ctx_ || te_ctx_->act.capacity() < te_->act_bytes(T)) {
     te_ctx_.reset();
     te_ctx_ = std::make_unique<Ctx>(dev_.text, te_->act_bytes(T), te_->scratch_bytes());
   }
@@ -431,6 +452,7 @@ VideoResult H3Pipeline::generate(const VideoRequest& r, const ProgressFn& cb, co
   ensure_dit(ref);
   apply_loras(r.loras);
   timer.mark("model_lora");
+  if (ref || !r.first_frame.empty() || !r.last_frame.empty()) ensure_vaes();  // 純文字生成不必先載 VAE
   Prepared p = ref ? prepare_ref2va(r, report) : prepare_fl2va(r, report);
   MX_INFO("H3 輸入準備（媒體／視覺塔／VAE 編碼／文字編碼）：%.1f 秒，序列 %lld 列（文字 %lld）",
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(), (long long)p.L.seq.S,
@@ -466,6 +488,20 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
 
   // DiT 取樣（影片 shift 預設 12、音訊 3，共用步數）。timesteps：0 影片、1 音訊、2 視覺參考、3 音訊參考。
   const auto ts = std::chrono::steady_clock::now();
+  bool tight = false;  // 單卡顯存吃緊：各階段用完就卸下
+  {
+    size_t free = 0, total = 0;
+    MX_CUDA(cudaSetDevice(dev_.dit));
+    MX_CUDA(cudaMemGetInfo(&free, &total));
+    const size_t need = dit_->act_bytes(seq.S) + dit_->scratch_bytes() + (size_t(1) << 30);
+    if (free < need) {
+      tight = true;
+      release_aux();
+      MX_CUDA(cudaMemGetInfo(&free, &total));
+      MX_INFO("H3 單卡省顯存：取樣前卸下 VAE／編碼器暫存，GPU%d 可用 %.1f GiB（需要約 %.1f GiB）", dev_.dit,
+              free / 1073741824.0, need / 1073741824.0);
+    }
+  }
   Ctx c(dev_.dit, dit_->act_bytes(seq.S), dit_->scratch_bytes());
   {
     DevBuf dt(p.txt.size() * 2, c.device);
@@ -517,30 +553,40 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   }
   c.sync();
   timer.mark("denoise");
-  MX_CUDA(cudaMemcpy(vrows.data(), dv.get(), vrows.size() * 4, cudaMemcpyDeviceToHost));
-  MX_CUDA(cudaMemcpy(arows.data(), da.get(), arows.size() * 4, cudaMemcpyDeviceToHost));
   MX_INFO("H3 DiT 取樣：%d 次前向 %.1f 秒", n, std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count());
   if (dump) {
     dump_dev("video_final.bin", dv.get(), dv.size());
     dump_dev("audio_final.bin", da.get(), da.size());
   }
 
-  timer.mark("latent_readback");
+  // 取樣暫存不再使用，解碼前釋放，避免兩階段的 GPU 記憶體重疊。
+  const size_t released = c.act.capacity() + c.scratch.size() + c.lt_ws.size() + vv.size() + va.size();
+  c.act = Arena{};
+  c.scratch = DevBuf{};
+  c.lt_ws = DevBuf{};
+  vv = DevBuf{};
+  va = DevBuf{};
+  MX_INFO("H3 解碼前釋放取樣暫存：%.1f MiB", released / 1048576.0);
+  ensure_vaes();
+  timer.mark("latent_readback");  // 保留既有計時欄位；一般路徑已不讀回 latent。
   // 音訊解碼 → WAV。rows：聲道優先 [2A, 32] → [2, 32, A]。
   report("decode_audio", 0, 1);
   const auto ta0 = std::chrono::steady_clock::now();
   fs::create_directories(paths_.out_dir);
   std::string stem = (fs::path(paths_.out_dir) / strf("h3_%lld", (long long)p.seed)).string();
   {
-    std::vector<float> az(kAudioChannels * Ca * A);
-    const float* ar = arows.data() + Nar * Ca;
-    for (int64_t ch = 0; ch < kAudioChannels; ch++)
-      for (int64_t a = 0; a < A; a++)
-        for (int64_t k = 0; k < Ca; k++) az[(ch * Ca + k) * A + a] = ar[(ch * A + a) * Ca + k];
     Ctx& ac = *avae_ctx_;
     ac.use();
-    DevBuf dz(az.size() * 4, ac.device);
-    MX_CUDA(cudaMemcpy(dz.get(), az.data(), az.size() * 4, cudaMemcpyHostToDevice));
+    const size_t bytes = size_t(kAudioChannels * Ca * A) * sizeof(float);
+    DevBuf transferred;
+    const float* src = da.as<float>() + Nar * Ca;
+    if (ac.device != c.device) {
+      transferred = DevBuf(bytes, ac.device);
+      MX_CUDA(cudaMemcpyPeer(transferred.get(), ac.device, src, c.device, bytes));
+      src = transferred.as<float>();
+    }
+    DevBuf dz(bytes, ac.device);
+    h3_latent::audio(src, dz.as<float>(), A, ac.stream);
     std::vector<float> pcm;
     avae_->decode(ac, dz.as<float>(), A, pcm);
     write_wav(stem + ".wav", pcm, H3AudioVae::kSampleRate);
@@ -548,19 +594,18 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   timer.mark("audio_decode_wav");
   const auto td = std::chrono::steady_clock::now();
   MX_INFO("H3 音訊解碼：%.1f 秒", std::chrono::duration<double>(td - ta0).count());
+  if (tight) {  // 影片 VAE 解碼需要的顯存最多，先讓出音訊 VAE 與其 1 GiB 暫存
+    avae_ctx_.reset();
+    avae_.reset();
+    size_t free = 0, total = 0;
+    MX_CUDA(cudaSetDevice(dev_.video_vae));
+    MX_CUDA(cudaMemGetInfo(&free, &total));
+    MX_INFO("H3 影片解碼前 GPU%d 可用 %.1f GiB（解碼需要 %.1f GiB）", dev_.video_vae, free / 1073741824.0,
+            vvae_->decode_act_bytes(H, W) / 1073741824.0);
+  }
 
   // 影片解碼：邊解邊送 ffmpeg（rawvideo rgb24 + wav → H.264/AAC）。
   report("decode_video", 0, 1);
-  std::vector<float> z(C * F_lat * H * W);
-  for (int64_t f = 0; f < F_lat; f++)
-    for (int64_t y = 0; y < H / 2; y++)
-      for (int64_t x = 0; x < W / 2; x++) {
-        int64_t row = (f * (H / 2) + y) * (W / 2) + x;
-        for (int64_t ch = 0; ch < C; ch++)
-          for (int ph = 0; ph < 2; ph++)
-            for (int pw = 0; pw < 2; pw++)
-              z[((ch * F_lat + f) * H + 2 * y + ph) * W + 2 * x + pw] = vrows[(Nr + row) * Cv + ch * 4 + ph * 2 + pw];
-      }
   std::string mp4 = stem + ".mp4";
   std::string cmd = strf("ffmpeg -y -loglevel error -f rawvideo -pix_fmt rgb24 -s %lldx%lld -r 24 -i - -i \"%s.wav\" "
                          "-c:v libx264 -pix_fmt yuv420p -crf 18 -c:a aac -b:a 192k -af apad -shortest \"%s\"",
@@ -575,9 +620,17 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   double pipe_seconds = 0;
   int written = 0;
   try {
-    Ctx vc(dev_.video_vae, vvae_->decode_act_bytes(H, W), 0);
-    DevBuf dz(z.size() * 4, vc.device);
-    MX_CUDA(cudaMemcpy(dz.get(), z.data(), z.size() * 4, cudaMemcpyHostToDevice));
+    Ctx vc(dev_.video_vae, vvae_->decode_act_bytes(H, W), vvae_->scratch_bytes());
+    const size_t bytes = size_t(C * F_lat * H * W) * sizeof(float);
+    DevBuf transferred;
+    const float* src = dv.as<float>() + Nr * Cv;
+    if (vc.device != c.device) {
+      transferred = DevBuf(bytes, vc.device);
+      MX_CUDA(cudaMemcpyPeer(transferred.get(), vc.device, src, c.device, bytes));
+      src = transferred.as<float>();
+    }
+    DevBuf dz(bytes, vc.device);
+    h3_latent::video(src, dz.as<float>(), F_lat, H, W, vc.stream);
     vvae_->decode(vc, dz.as<float>(), F_lat, H, W, [&](const uint8_t* rgb, int nf) {
       size_t bytes = size_t(nf) * (W * 16) * (H * 16) * 3;
       const auto pipe_start = std::chrono::steady_clock::now();

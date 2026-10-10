@@ -22,6 +22,7 @@ class QwenImageVae {
 
   // 解碼一張 HxW latent 需要的啟用值記憶體上限估計（位元組），給呼叫端配置 Ctx。
   size_t decode_act_bytes(int64_t H, int64_t W) const;
+  size_t encode_act_bytes(int64_t h, int64_t w) const;  // 像素尺寸
   static const float* latents_mean();  // 64 個
   static const float* latents_std();   // 64 個
 

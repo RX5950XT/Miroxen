@@ -37,6 +37,7 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 `GET /health` → `{"status":"ok"}`
 
 `GET /v1/models` 為 OpenAI 風格清單。`kind` 是 `image` 或 `video`，`loaded` 表示是否已載入；未載入仍可生成，第一次會按需載入。
+圖片有兩個模型：`qwen-image-2.1`（標準，預設 40 步）與 `qwen-image-2.1-turbo`（Qwen 官方 8 步蒸餾版，共用編碼器與 VAE）。生成時用 `model` 選擇；切換會重新載入 DiT。
 `files` 是按角色分組的已安裝檔名；`defaults` 為預設檔名、`active_files` 為目前已載入路徑、`default_compute` 為伺服器預設運算精度。生成中查詢不等待整次推論完成。
 
 ```json
@@ -62,6 +63,7 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 完成工作的 `result.timings` 提供各階段秒數；與 `result.seconds` 一樣不含佇列等待、首次模型載入和 HTTP 傳輸。
 圖片分成 `lora`、`input`、`text_vision_encode`、`vae_encode`、`dit_prepare`、`denoise`、`latent_layout_transfer`、`vae_decode`、`png_encode`。
 影片分成 `model_lora`、`input_encode`、`text_encode`、`dit_prepare`、`denoise`、`latent_readback`、`audio_decode_wav`、`video_prepare`、`video_vae_decode`、`ffmpeg_pipe`、`ffmpeg_finish`。
+H3 一般生成已移除 latent 的 CPU 往返；`latent_readback` 保留欄位名稱，目前主要計入釋放取樣暫存（開啟 dump 時仍會讀回除錯資料）。GPU 排列轉換與必要跨卡搬運計入音訊／影片解碼階段。
 各項不重複計費，合計約等於 `seconds`。這是階段牆鐘時間：階段內仍包含必要資料搬運；不是純 GPU 核心耗時。
 影片 `input_encode` 包含媒體讀取、視覺塔及參考素材 VAE；`ffmpeg_pipe`／`ffmpeg_finish` 是寫入／等待時間，ffmpeg 自己的計算可能與 VAE 重疊。
 `model_lora` 包含 FL2VA／Ref2VA 間切換 DiT checkpoint 與 LoRA 載入；外層管線的首次載入仍不計入。
@@ -73,7 +75,7 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 
 `"auto"` 的意思：圖像必須帶 `images`，依最後一張參考圖的比例、約 1024² 像素；影片有首幀時依首幀比例（只給尾幀就依尾幀），否則 16:9，短邊 768（官方畫布，即 1344×768）。
 
-`steps` 圖像是 1 到 200，影片是 2 到 200。省略時圖像 40、影片 30。影片的 `steps` 是取樣點數，實際前向次數＝steps − 1（「8 步」加速 LoRA 要傳 9）。`cfg_scale` 若出現必須是 0 到 20 的有限數字；只有圖像會把它交給引擎，預設 1。`seed` 是整數，省略或 `-1` 表示由引擎抽一個。
+`steps` 圖像是 1 到 200，影片是 2 到 200。省略時圖像 40（Turbo 8）、影片 30。Turbo 固定使用模型自帶的 8 個 sigma（`[1,0.978453,0.95418,0.926626,0.89508,0.845148,0.704534,0.414568]`，不位移），`steps` 只能是 8；要其他節點請改給 `sigmas`（Turbo 會原值使用、不位移），否則回 `400 invalid_steps`。影片的 `steps` 是取樣點數，實際前向次數＝steps − 1（「8 步」加速 LoRA 要傳 9）。`cfg_scale` 若出現必須是 0 到 20 的有限數字；只有圖像會把它交給引擎，預設 1。`seed` 是整數，省略或 `-1` 表示由引擎抽一個。
 
 `loras` 是 `[{"name":"檔名.safetensors","scale":1.0}]`。`name` 只能是目錄裡的檔名：拒絕 `..`、絕對路徑、斜線、反斜線與磁碟機冒號。`scale` 預設 1。
 
@@ -81,9 +83,12 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 
 影片幀數欄位是 `num_frames`（也接受 `frames`），5 到 361，預設 56。實際輸出向上對齊至 17n+5，最少 22 幀（約 0.92 秒），以滿足 VAE 解碼需求。
 
-`shift_terminal` 只用於圖像，布林值，預設 `true`（官方排程：最後一步拉伸到 0.02）。步數蒸餾 LoRA（例如 Turbo8）要設 `false`。
+`shift_terminal` 只用於標準圖像模型，布林值，預設 `true`（官方排程：最後一步拉伸到 0.02）。步數蒸餾 LoRA 要設 `false`；Turbo 忽略此值。
 
-`sigmas` 只用於圖像，選填：1 到 200 個數字的陣列，每個值在 (0, 1]，應該遞減、從 1 開始（伺服器只檢查範圍）。這是還沒位移的排程節點，給了就以節點數當步數、忽略 `steps`。例如 Viggle 6 步加速 LoRA：`"sigmas":[1,0.9375,0.875,0.75,0.5,0.25],"shift_terminal":false`。
+`sigmas` 只用於圖像，選填：1 到 200 個數字的陣列，每個值在 (0, 1]，應該遞減、從 1 開始（伺服器只檢查範圍）。這是還沒位移的排程節點，給了就以節點數當步數、忽略 `steps`。例如 6 步蒸餾 LoRA：`"sigmas":[1,0.9375,0.875,0.75,0.5,0.25],"shift_terminal":false`。
+
+
+切換權重與重建快取的耗時另外列在 `result.timings.lora_switch`；混合模式可能改善細節，但不保證比 6 步漂亮，也不保證作者框架的加速比例。
 
 `video_shift` 只用於影片，0.5 到 50 的數字，預設 12（官方）；LightX2V 768p 加速 LoRA 建議 6。
 
@@ -163,14 +168,22 @@ HTTP 狀態搭配這個物件，成功的回應沒有 `error` 包裹：
 - 每張 GPU：`utilization_percent`、`temperature_c`、`power_w`；透過 NVIDIA 驅動的 NVML 取得，按 PCI bus 對應 CUDA 卡號。驅動不提供的值為 `null`，不以 0 假裝閒置。
 - `api`：`requests`、`errors`（已完成的 `/v1/*` 請求，包含監控輪詢與 4xx／5xx）、`uptime_seconds`、`authentication`。重啟後歸零。CPU 首筆尚無採樣間隔時為 `null`；目前主機用量支援 Windows。
 
-`GET /v1/loras` 每筆新增 `model`、`purpose`、`task`、`preset`。目前已知的加速版本提供精確預設；其他檔案可能無法識別，此時 `model:"unknown"` 並附提示，不承諾相容性。
+`GET /v1/loras` 每筆新增 `model`、`purpose`、`task`、`preset`。影片的已知加速 LoRA 提供精確預設；圖片 LoRA 一律視為畫風（圖片加速改用 Turbo 模型）。認不出的檔案為 `model:"unknown"` 並附提示，不承諾相容性。
+
+社群 LoRA 安裝（皆遵循 Bearer 金鑰）：
+- `POST /v1/loras/upload?name=<檔名>.safetensors`：本文是檔案原始位元組（`Content-Type: application/octet-stream`），上限 8 GB，不受 `--max-body` 限制，邊收邊寫暫存檔。成功回 `201 {"name","model","size"}`。
+- `POST /v1/loras/install {"url":"..."}`：伺服器以 `curl` 背景下載，回 `202`。只接受 `https://` 的 Hugging Face 單檔網址（`/blob/` 自動轉 `/resolve/`）與 Civitai 模型頁／下載連結（模型頁沒指定版本時取最新版）。同時最多兩筆，超過回 `429 too_many_installs`。需要登入的檔案請在伺服器環境變數設 `CIVITAI_TOKEN` 或 `HF_TOKEN`。
+- `GET /v1/loras/installs`：最近的下載，`state` 為 `queued`／`downloading`／`installing`／`done`／`failed`，含已下載 `bytes` 與失敗原因 `error`；重啟後清空。
+- 兩種方式都會讀 safetensors 張量名稱自動判斷：含 `transformer_blocks` 為圖片（放 `image/`），H3 的 `blocks.`／`token_refiner` 為影片（放 `video/`）；沒有 LoRA 張量或認不出回 `400 unsupported_lora`，同名回 `400 lora_exists`，檔名不合法回 `400 invalid_lora`，網址不合法回 `400 invalid_url`。失敗不留檔。
 LoRA 清單讀取 `models/loras/` 與其 `image/`、`video/` 子目錄；請求仍使用檔名，不接受路徑。不同分類若有同名檔案，回應 `400 ambiguous_lora`，避免載入錯誤的 LoRA。
 工作物件新增 `parameters`，含輸出設定、LoRA、預計對齊後的影片幀數、24 fps 與秒數；不包含 base64 素材。`result.seconds` 仍為生成耗時，和影片播放長度不同。
 
 面板功能重點：
 - 創作／硬體監控／API 三個分頁；自訂 32 倍數尺寸、目標秒數和對齊後影片長度、結果下載。
 - 圖片任務：生成／編輯、透明圖、去背、局部修改。後三者是提示詞與參考圖的操作入口；局部修改需原圖＋遮罩圖，沒有像素鎖定保證。
-- LoRA 依模型／FL2VA／Ref2VA 篩選；一次一顆已知加速 LoRA，可疊畫風。勾選時套用步數、sigma、CFG、shift；取消加速或換任務時回原版排程。沒有逐步切換 LoRA 的 9 步混合模式。
+- 圖片模式頂端選「標準」或「Turbo」；Turbo 鎖定 8 步並隱藏排程設定。頂列標籤顯示雙卡或單卡顯存。進階設定預設收合，摘要顯示步數、CFG、種子。
+- LoRA 依模型／FL2VA／Ref2VA 篩選。圖片 LoRA（標準與 Turbo 共用）顯示強度滑桿；影片加速 LoRA 強度固定 1，勾選後套用作者排程，取消或換任務時回原版排程。API 的一般 `loras.scale` 契約不變。
+- 「安裝社群 LoRA」可拖放 `.safetensors` 上傳（顯示進度），或貼 Hugging Face／Civitai 網址下載；完成後自動出現在清單。
 - 模型檔按已安裝清單選擇；參考素材短邊與影片原生畫布可調。API 分頁可預覽／複製相同設定的完整 JSON。
 - 尺寸：圖像多一個「依參考圖比例」（送 `size:"auto"`，需要先加參考圖）；影片預設選項是 864×480、1344×768（官方）、480×864、自動。
 - 取樣排程進階區：自訂 sigma 節點、尾端拉伸（`shift_terminal`）勾選。
@@ -179,7 +192,7 @@ LoRA 清單讀取 `models/loras/` 與其 `image/`、`video/` 子目錄；請求�
 
 ## 程式進入點
 
-伺服器本體是 `mx::run_server(engine, opt)`，由 `miroxen serve` 啟動。加 `--fake` 會改用假引擎（不載入模型），也可從測試程式啟動：
+伺服器本體是 `mx::run_server(engine, opt)`，由 `miroxen serve` 啟動。`--gpus 0`、`--gpus 1`、`--gpus 0,1` 只用指定的卡（nvidia-smi 編號），單卡時自動改用逐層串流與省顯存配置。加 `--fake` 會改用假引擎（不載入模型），也可從測試程式啟動：
 
 ```
 build\miroxen.exe serve --fake

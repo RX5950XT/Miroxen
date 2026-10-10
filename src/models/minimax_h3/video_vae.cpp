@@ -168,8 +168,10 @@ struct H3VideoVae::Impl {
   bool comfy;
   std::vector<int> channels,space_down,time_down;
 
-  bool quantized=false;QMode qmode=QMode::BF16;
-  Impl(const TensorStore& st,int dev,QMode compute):small(st,dev),device(dev) {
+  bool quantized=false,q8_attn=false,q8_ffn=false;QMode qmode=QMode::BF16;
+  Impl(const TensorStore& st,int dev,QMode compute,bool compact):small(st,dev),device(dev) {
+    const bool fp8=compute!=QMode::BF16 && qmode_supported(compute,dev);
+    q8_attn=compact;q8_ffn=compact && !fp8;  // FFN 能走 FP8 時交給下面的區塊縮放量化
     MX_CUDA(cudaSetDevice(dev)); const auto cfg=read_config();
     auto num=[&](const char* n){return cfg.at(n).integer();};
     MX_CHECK(num("in_channels")==3 && num("out_channels")==3 && num("latent_channels")==24,
@@ -219,8 +221,8 @@ struct H3VideoVae::Impl {
       }
       quantized=true;qmode=compute;
     }
-    MX_INFO("H3 影片 VAE：%s，權重 %.1f MiB，解碼器 %s",comfy?"Comfy":"diffusers",weight_bytes()/1048576.0,
-            quantized?qmode_name(compute):"bf16");
+    MX_INFO("H3 影片 VAE：%s，權重 %.1f MiB，解碼器 %s%s",comfy?"Comfy":"diffusers",weight_bytes()/1048576.0,
+            quantized?qmode_name(compute):"bf16",q8_attn?"（省顯存：Q8_0 權重）":"");
   }
   DevBuf upload(const std::vector<float>& data) {
     DevBuf b(data.size()*sizeof(float),device);MX_CUDA(cudaMemcpy(b.get(),data.data(),b.size(),cudaMemcpyHostToDevice));return b;
@@ -291,6 +293,12 @@ struct H3VideoVae::Impl {
       ensure_taps(lv.down);
     }
   }
+  // 把剛載入的 bf16 線性層換成 Q8_0；逐層轉，載入時的顯存峰值只多一層。
+  Linear to_q8(Linear l) {
+    DevBuf q8(size_t(l.in)*l.out/32*34,device);
+    quantize_q8_0(static_cast<const bf16*>(l.w.p),l.in*l.out,q8.get(),nullptr);MX_CUDA(cudaDeviceSynchronize());
+    l.w={q8.get(),GType::Q8_0,{l.out,l.in}};matrices[l.name]=std::move(q8);return l;
+  }
   void load_block(int i) {
     auto base="decoder.transformer_blocks."+std::to_string(i);Block b;
     b.n1=f32(base+".norm1.weight",{D});b.n2=f32(base+".norm2.weight",{D});
@@ -301,7 +309,10 @@ struct H3VideoVae::Impl {
     }
     b.proj=load_linear(base+(comfy?".attn.to_out":".attn.to_out.0"),D,D);
     b.ff1=load_linear(base+(comfy?".ff.w1":".ff.net.0.proj"),D,2*ff);
-    b.ff2=load_linear(base+(comfy?".ff.w2":".ff.net.2"),ff,D);blocks.push_back(std::move(b));
+    b.ff2=load_linear(base+(comfy?".ff.w2":".ff.net.2"),ff,D);
+    if(q8_attn) for(Linear* l:{&b.q,&b.k,&b.v,&b.qkv,&b.proj}) if(l->in) *l=to_q8(*l);
+    if(q8_ffn) for(Linear* l:{&b.ff1,&b.ff2}) *l=to_q8(*l);
+    blocks.push_back(std::move(b));
   }
   void load_encoder(int count) {
     MX_CHECK(count>0 && count<=16,"H3 VAE encoder block 數無效");
@@ -522,7 +533,12 @@ struct H3VideoVae::Impl {
   }
 };
 
-H3VideoVae::H3VideoVae(const TensorStore& st,int device,QMode compute):impl_(nullptr) {impl_=new Impl(st,device,compute);}
+H3VideoVae::H3VideoVae(const TensorStore& st,int device,QMode compute,bool compact):impl_(nullptr) {impl_=new Impl(st,device,compute,compact);}
+size_t H3VideoVae::scratch_bytes() const {
+  size_t m=0;for(auto& b:impl_->blocks) for(const Linear* l:{&b.q,&b.k,&b.v,&b.qkv,&b.proj,&b.ff1,&b.ff2})
+    if(l->in && l->w.type==GType::Q8_0) m=std::max(m,linear_scratch_bytes(*l));
+  return m;
+}
 H3VideoVae::~H3VideoVae(){delete impl_;}
 size_t H3VideoVae::decode_act_bytes(int64_t H,int64_t W) const {
   MX_CHECK(H>0 && W>0 && H<=4096 && W<=4096,"H3 VAE latent 尺寸無效");return impl_->act_bytes(int(H),int(W));

@@ -2,6 +2,69 @@
 
 ## 計畫
 
+### Turbo 生圖、單卡 8G／16G、社群 LoRA、儀表板（2026-10-11）
+- [x] 研究 Open-VC Attention 能否套用（結論寫入 docs/RESEARCH.md）
+- [x] Qwen-Image-2.1-Turbo（AtomicChat Q8_0）成為第二個生圖模型 `qwen-image-2.1-turbo`；預設文字編碼器換 AtomicChat 去拒答 AD-Q4_K
+- [x] 移除圖片加速 LoRA（Viggle／Turbo8 檔案移至 out/trash）與 Viggle 9 步混合模式
+- [x] 單卡自動配置：`--gpus`；Qwen 依顯存串流文字編碼器／DiT；H3 取樣前卸下 VAE、8G 卡 VAE 解碼器存 Q8_0
+- [x] 社群 LoRA 安裝（上傳／網址下載、自動判斷圖片或影片）
+- [x] 儀表板改良（標準／Turbo 模型卡、顯示卡配置標籤、LoRA 安裝、進階設定收合）
+- [x] 文件、完整驗收
+
+Review：
+- Turbo：`qwen-image-2.1-turbo` 為第二個圖片模型，固定 8 個原值 sigma（不位移）；API 省略 steps 用 8，其他步數未給 sigmas 回 invalid_steps；CLI `--turbo`。正式服務 1024²：Turbo 6.6 秒、標準 40 步 29.7 秒；招牌文字、雪景圖已看圖。預設文字編碼器改 AtomicChat 去拒答 AD-Q4_K。Viggle／Turbo8 LoRA 移至 `out/trash/image-acceleration-loras-20261011/`，Viggle 混合模式程式移除（移除前的未提交 diff 備份在 `out/reports/pre-turbo-uncommitted-20261011.patch`）。
+- 單卡：`--gpus`；Qwen 依 cudaMemGetInfo 決定串流文字編碼器／DiT（BlockStreamer 支援 gate/proj 接合），同卡時 VAE 編碼／解碼按需放大 DiT Arena。H3 取樣前顯存不足即卸下 VAE／視覺塔／編碼器暫存、音訊解碼後再放掉音訊 VAE；<12 GiB 單卡 VAE 解碼器存 Q8_0（新 GPU 量化核心 quantize_q8_0）。8 GB 影片 864×480／56 幀：316 → 68 秒（取樣 190→43 秒是因先前溢出，解碼 262→17 秒）。CLI 與 `serve --gpus 1` 實測圖片、編輯、LoRA、影片均成功並看圖。
+- LoRA：`POST /v1/loras/upload`（串流寫檔，8 GB 上限，其他 API 仍受 --max-body）、`POST /v1/loras/install`（curl 不經 shell，HF／Civitai 網址正規化）、`GET /v1/loras/installs`；依張量名自動放 image／video。實測 HF 原神 TCG LoRA 下載安裝並疊在 Turbo 出圖（192 層）。Civitai 實際下載未驗證（只驗網址轉換）。
+- 驗證：`build.bat` 成功；`ctest --test-dir build --output-on-failure` 19 通過、qwen_dit_parity_test 依例 Skipped（原版權重已移走）；qwen_image_e2e_test 因缺官方 VAE 檔回報 SKIP 但回 0（既有問題，未改）。server_test 328 項、dequant Q8_0 往返、weights_concat 串流接合新增。`tests/dashboard_check.js` 34/34（正式服務），impeccable detect 只剩結果圖執行時才設 src 的既有提示。
+- 未做：Open-VC 不能直接用（B200 限定），評估寫入 docs/RESEARCH.md §5；未移植 ExpCast。8 GB 卡無 FP8，未做 INT8 GEMM。
+
+
+### 硬體利用與畫質保留最佳化（2026-10-08）
+- [x] 量影片現況，確認解碼前資料搬運與暫存生命週期
+- [x] H3 影片／音訊 latent 在 GPU 轉換，移除 CPU 往返，保持數值與精度
+- [x] 建置、逐位元對照、實際影片與分段計時驗收，恢復服務
+
+Review：
+- H3 FL2VA／Ref2VA 共用解碼路徑改為 GPU 排列轉換；只取生成列，跳過參考區塊。同卡直接使用取樣結果，跨卡搬目標 latent，不再 GPU→CPU 重排→GPU。解碼前同步完成取樣並釋放 c.act／scratch／Lt workspace／速度緩衝；864×480、56 幀實際記錄釋放 1635.0 MiB。模型、步數與精度不變。
+- `build.bat` 成功；`ctest --test-dir build -R 'h3_latent_test|h3_frames_test|h3_audio_vae_test|h3_video_vae_test|server_test' --output-on-failure`：5/5 通過（46 秒，VAE 參考並未 skip）。新測試有非方形／非整 block／參考列 offset、同卡和跨卡逐位元對照。`CUDA_DEVICE_ORDER=PCI_BUS_ID` 下 `build/h3_latent_test.exe --benchmark`：72×80×46 latent 幾何（736×1280、243 幀），舊 CPU 往返 23.054 ms、新 GPU 0.269 ms，省 51,079,680 bytes 主機搬運／次；這是微型測試，不是完整 10 秒生成。
+- 真實 FP8：864×480、56 幀、FL4、相同 seed／提示詞，各版本一次暖機後兩次量測。改前 26.458／25.208 秒，改後 25.424／25.469 秒；背景桌面、Broadcast、Wallpaper Engine 等仍在跑，且未交錯版本，不能宣稱完整生成明顯加速。這輪主要收益是解碼前降低 GPU 記憶體重疊；釋放本身約需 10–20 ms。
+- 額外實際 FL 首尾幀、Ref 圖片＋音訊各完成 448×256／22 幀；ffprobe 確認三種流程均 24 fps、正確幀數及音軌，文生／Ref 首幀已看圖。`out/qa/h3-transfer-20261008` 保存 before／after／references 請求結果與截圖；服務於 8188 恢復、新輸出在 `out/generated/2026-10-08-optimized`。README／API 同步計時定義，diff 檢查通過。未跑完整 ctest、BF16／FP4 完整生成或 720p／10 秒端到端品質比較，未改圖片管線或下載新權重。
+
+### LoRA 強度控制修正（2026-10-08）
+- [x] 加速 LoRA 固定強度 1，僅畫風顯示滑桿，保留作者步數預設
+- [x] 介面驗證圖片／FL2VA／Ref2VA 預設、畫風強度與混合模式
+
+Review：儀表板僅已識別的畫風 LoRA 顯示強度滑桿；加速與未識別用途的 LoRA 請求固定 scale 1，既有非 1 狀態也不會流入加速請求。無滑桿的列使用全寬。勾選加速 LoRA 仍套用既有作者預設，Viggle 混合需另外選取；一般步數可手動修改。Edge headless 的 `tests/viggle_hybrid_check.js` 14 項通過，涵蓋圖片、FL4／FL8／Ref8、混合切換及模擬畫風 scale 0.65；JS 語法與 diff 檢查通過。未修改 API／CLI 強度契約或推論引擎，未重跑 GPU 生圖／完整 ctest。
+
+### Viggle 9 步混合模式（2026-10-08）
+- [x] 共用設定驗證、API／CLI／儀表板入口，保留原有 6 步模式
+- [x] 第八步前卸下 LoRA、還原底模並重建 DiT prefix 快取
+- [x] 建置、參數與介面檢查、實際生成／編輯／取消後恢復驗收
+
+Review：
+- `viggle_hybrid` 使用作者的 9 個 sigma，7 次 Viggle forward 後以 `apply_loras({})` 從原始權重還原底模，重跑 prefix prepare 清除 K/V；下一次一般生成會重新套用要求的 LoRA。API、CLI 與管線共用設定驗證，只接受單一 v0.3 r256、強度／CFG 1、無負向提示詞。UI 可切回原有 6 步，換 Turbo8 或影片會清除混合模式。
+- `build.bat` 通過；`ctest --test-dir build -R 'image_sampling_test|server_test|weights_concat_test|qwen_latent_test' --output-on-failure`：4/4 通過；JS 語法與 `git diff --check` 通過。Edge headless 執行 `tests/viggle_hybrid_check.js`：6 項檢查通過。
+- UC Q8／FP8、Q4_K_M TE、紋理修正 VAE：512² 的 6 步、9 步混合、參考圖編輯、切換期取消、取消後再跑 6 步共 5 項 GPU 驗收成功；9 步有 `base_tail` 與 `lora_switch`，生成／編輯輸出非黑灰圖。CLI `--viggle-hybrid` 256² 實際 9 步出圖成功（6.9 秒）。紀錄及作品在 `out/qa/viggle-hybrid-20261008/`。
+- 512² 混合模式的切換耗時約 2.40 秒，參考圖編輯約 7.30 秒，已獨立列入 `timings.lora_switch`；不能套用作者其他框架的耗時比例。未做全面畫質 A/B，也未實測 BF16／FP4 混合路徑；未跑完整 ctest。
+- 重啟至更新版本，服務輸出為 `out/generated/2026-10-08`。先前背景啟動複合命令被工具拒絕（僅回 `blocked by policy`），已改由執行工具直接管理服務並成功啟動，未解除審查。
+
+### 待刪資料集中（2026-10-08）
+- [x] 將 out 舊資料、Q8 專用測試／reference／下載快取移至 `_cleanup_pending/20261008`，保留相對路徑
+- [x] 核對檔案數與大小，確認來源已移出、API 健康；不執行刪除
+
+Review：566 個檔案已集中隔離，映射在該目錄的 `manifest.json`；`out` 原有 559 檔共 596,713,578 bytes 全數移入。首次核對誤將七個單檔各計兩次，已修正計數並確認八個來源均不存在、目的均存在。重新建立服務用空白輸出目錄，`GET /health` 為 ok、`git diff --check` 通過；隔離目錄已加入 gitignore。僅搬移，未刪除或釋放容量；尚未完成預設／文件殘留清理，未執行生成或建置。
+
+### 未使用模型資料清理（2026-10-08）
+- [x] 核對 runtime、儀表板選項及數值測試依賴，保留可用權重與必要 HF VAE
+- [x] 移出重複 HF snapshots、歷史 H3 dump 與未引用的四層 reference
+- [x] 驗證保留檔案及服務狀態，記錄隔離結果
+- [ ] 實際刪除隔離資料（自動審查拒絕，未釋放容量）
+
+Review：
+- `hf/FL2VA`、`hf/Ref2VA` 是無權重 shards 的重複 snapshot；四個 `models/ref/h3_dump*` 為歷史除錯輸出，`h3_dit_ref_4l.safetensors` 沒有現行 caller。339 檔共 399,897,264 bytes（381.37 MiB）已移至 `out/trash/unused-model-data-20261008`；可選權重、LoRA、實用 reference 與 HF VAE 均保留。
+- 原生 PowerShell `Remove-Item` 被自動審查拒絕，僅回 `blocked by policy`；未繞過刪除，也未宣稱釋放容量。前次 `out/trash` 本輪開始時已不存在，沒有將舊垃圾狀態當作現況。
+- 比對清理前後檔案路徑及大小：保留的 222 檔完全一致，7 個來源已移出且目的均存在；`GET /health` 為 ok，`GET /v1/models` 仍列出 UC 圖片與 FL／Ref 影片權重及其他角色，`GET /v1/loras` 仍列出六個 LoRA。詳細移動映射與驗收在 `out/reports/unused-model-data-20261008.json`；未重跑生成或 GPU 測試，沒有修改程式或權重。
+
 ### 模型分類與輸出整理（2026-10-07）
 - [x] 圖片／影片權重與 LoRA 分類，原版圖片 DiT 移出載入目錄
 - [x] 同步預設、CLI／API、測試與來源文件，UC-Q8_0 為圖片唯一預設

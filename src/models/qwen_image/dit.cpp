@@ -11,7 +11,7 @@ namespace mx {
 
 static float round_bf16(float v) { return __bfloat162float(__float2bfloat16(v)); }
 
-QwenImageDit::QwenImageDit(const TensorStore& st, int device, QMode compute) : dw_(st, device) {
+QwenImageDit::QwenImageDit(const TensorStore& st, int device, QMode compute, bool stream) : dw_(st, device) {
   if (!qmode_supported(compute, device)) {
     MX_INFO("GPU%d 不支援 %s 運算，DiT 改用 bf16", device, qmode_name(compute));
     compute = QMode::BF16;
@@ -42,24 +42,33 @@ QwenImageDit::QwenImageDit(const TensorStore& st, int device, QMode compute) : d
   txt_norm_w_ = DevBuf(w.size() * 4, device);
   MX_CUDA(cudaMemcpy(txt_norm_w_.get(), w.data(), w.size() * 4, cudaMemcpyHostToDevice));
 
+  blocks_.reserve(n);  // 串流器保存 Linear 位址，不能重新配置
   for (int i = 0; i < n; i++) {
     std::string p = "transformer_blocks." + std::to_string(i) + ".";
+    auto lin = [&](const std::string& name) { return stream ? make_linear_streamed(dw_, p + name) : make_linear(dw_, p + name); };
     Block b;
-    b.q = make_linear(dw_, p + "attn.to_q");
-    b.k = make_linear(dw_, p + "attn.to_k");
-    b.v = make_linear(dw_, p + "attn.to_v");
-    b.o = make_linear(dw_, p + "attn.to_out.0");
-    b.gate_up = st.has(p + "img_mlp.gate_up.weight") ? make_linear(dw_, p + "img_mlp.gate_up")
-        : make_linear_concat(dw_, p + "img_mlp.gate_up", p + "img_mlp.gate_layer", p + "img_mlp.proj");
-    b.out = make_linear(dw_, p + "img_mlp.out");
+    b.q = lin("attn.to_q");
+    b.k = lin("attn.to_k");
+    b.v = lin("attn.to_v");
+    b.o = lin("attn.to_out.0");
+    if (st.has(p + "img_mlp.gate_up.weight")) b.gate_up = lin("img_mlp.gate_up");
+    else if (stream) b.gate_up = make_linear_streamed_concat(dw_, p + "img_mlp.gate_up", p + "img_mlp.gate_layer", p + "img_mlp.proj");
+    else b.gate_up = make_linear_concat(dw_, p + "img_mlp.gate_up", p + "img_mlp.gate_layer", p + "img_mlp.proj");
+    b.out = lin("img_mlp.out");
     b.norm_q = dw_.f32(p + "attn.norm_q.weight");
     b.norm_k = dw_.f32(p + "attn.norm_k.weight");
-    for (Linear* l : {&b.q, &b.k, &b.v, &b.o, &b.gate_up, &b.out}) dw_.quantize(*l, compute);
+    if (!stream)
+      for (Linear* l : {&b.q, &b.k, &b.v, &b.o, &b.gate_up, &b.out}) dw_.quantize(*l, compute);
     blocks_.push_back(b);
   }
+  if (stream) {
+    streamer_ = std::make_unique<BlockStreamer>(device, compute_);
+    for (auto& b : blocks_) streamer_->add_block(st, {&b.q, &b.k, &b.v, &b.o, &b.gate_up, &b.out});
+    streamer_->finalize();
+  }
   cfg_.ffn = blocks_[0].out.in;
-  MX_INFO("Qwen-Image DiT：%d 層、dim %lld、權重 %.2f GiB（%s，運算 %s）", n, (long long)cfg_.dim,
-          dw_.bytes() / 1073741824.0, gtype_name(blocks_[0].q.w.type), qmode_name(compute_));
+  MX_INFO("Qwen-Image DiT：%d 層、dim %lld、權重 %.2f GiB（%s，運算 %s%s）", n, (long long)cfg_.dim,
+          weight_bytes() / 1073741824.0, gtype_name(blocks_[0].q.w.type), qmode_name(compute_), stream ? "，逐層串流" : "");
 }
 
 size_t QwenImageDit::scratch_bytes() const {
@@ -326,7 +335,10 @@ void QwenImageDit::forward(Ctx& c, QwenImageSeq& seq, const float* latents, floa
     linear(c, img_in_, lb, N, hb);
     bf16_to_f32(hb, ximg, N * dim, c.stream);
   }
-  for (int i = 0; i < cfg_.layers; i++) run_block(c, seq, i, x, rows, prefill, mod);
+  for (int i = 0; i < cfg_.layers; i++) {
+    if (streamer_) streamer_->acquire(c, i);
+    run_block(c, seq, i, x, rows, prefill, mod);
+  }
   seq.cached = true;
 
   // 只對目標列做輸出頭。

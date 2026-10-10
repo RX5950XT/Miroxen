@@ -1,12 +1,13 @@
 // Miroxen 命令列：
 //   miroxen image  -p "prompt" [-o out.png] [-W 1024 -H 1024] [--steps 40] [--seed N] [--lora file:scale]
 //                  [--ref 參考圖.png ...]（影像編輯，最多 10 張）[--sigmas 1,0.9375,0.875,0.75,0.5,0.25]
-//                  [--shift-terminal 0]（步數蒸餾 LoRA 用，例如 Turbo8：--steps 8 --shift-terminal 0）
+//                  [--shift-terminal 0]（步數蒸餾 LoRA 用）[--turbo]（Qwen-Image-2.1-Turbo，固定 8 步排程）
 //   miroxen video  -p "prompt" [-W 864 -H 480] [--frames 56] [--steps 30] [--first 首幀.png] [--last 尾幀.png]
 //                  [--ref image=圖.png --ref video=片.mp4 --ref audio=聲.wav]（Ref2VA 參考生成）[--shift 12]
 //   miroxen serve  [--port 8188] [--host 0.0.0.0] [--api-key KEY] [--max-body 256（MB，0＝不限）] [--fake]
 // 模型路徑預設在 models/ 底下，可用 --qi-dit / --qi-te / --qi-vae / --qi-tok 覆寫。
 // --compute bf16|fp8|fp4：DiT 運算精度（fp8/fp4 用 Blackwell 區塊縮放 tensor core）。
+// --gpus 0 / 1 / 0,1：只用指定的卡（nvidia-smi 編號）；單卡時模型依顯存自動改用逐層串流。
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -37,7 +38,7 @@ struct Args {
 Args parse(int argc, char** argv) {
   Args a;
   if (argc > 1) a.cmd = argv[1];
-  static const char* kFlags[] = {"--fake", "--help"};
+  static const char* kFlags[] = {"--fake", "--help", "--turbo"};
   for (int i = 2; i < argc; i++) {
     std::string k = argv[i];
     bool flag = false;
@@ -58,6 +59,7 @@ EngineConfig engine_config(const Args& a) {
   EngineConfig c;
   if (a.has("--models")) c.models_dir = a.get("--models");
   c.qi_dit = a.get("--qi-dit", c.qi_dit);
+  c.qi_turbo_dit = a.get("--qi-turbo-dit", c.qi_turbo_dit);
   c.qi_te = a.get("--qi-te", c.qi_te);
   c.qi_vae = a.get("--qi-vae", c.qi_vae);
   c.qi_tok = a.get("--qi-tok", c.qi_tok);
@@ -95,7 +97,8 @@ int cmd_image(const Args& a) {
   r.ref_images = a.refs;
   r.width = a.geti("-W", a.refs.empty() ? 1024 : 0);  // 編輯時預設依參考圖比例
   r.height = a.geti("-H", a.refs.empty() ? 1024 : 0);
-  r.steps = a.geti("--steps", 40);
+  if (a.has("--turbo")) r.model = kQwenTurboId;
+  r.steps = a.geti("--steps", a.has("--turbo") ? 8 : 40);
   for (std::string s = a.get("--sigmas", ""); !s.empty();) {
     size_t c = s.find(',');
     r.sigmas.push_back(float(std::atof(s.substr(0, c).c_str())));
@@ -153,6 +156,13 @@ int cmd_video(const Args& a) {
 int main(int argc, char** argv) {
   try {
     Args a = parse(argc, argv);
+    if (a.has("--gpus")) {  // 必須在第一次 CUDA 呼叫前設定
+#ifdef _WIN32
+      _putenv_s("CUDA_VISIBLE_DEVICES", a.get("--gpus").c_str());
+#else
+      setenv("CUDA_VISIBLE_DEVICES", a.get("--gpus").c_str(), 1);
+#endif
+    }
     if (a.cmd == "image") return cmd_image(a);
     if (a.cmd == "video") return cmd_video(a);
     if (a.cmd == "serve") return cmd_serve(a.kv, engine_config(a));

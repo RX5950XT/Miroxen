@@ -156,6 +156,27 @@ void benchmark(GType t, int dev) {
   std::printf("BENCH GPU%d %s %s -> bf16 5376x28672: median %.3f ms, min %.3f ms, max %.3f ms, %.1f GB/s (input+output; 15 runs)\n",
               dev, prop.name, gtype_name(t), ms, times.front(), times.back(), (raw.size() + n * 2) / (ms * 1e6));
 }
+// bf16 → Q8_0（GPU）→ f32（CPU 參考）：每塊誤差不超過 scale/2（再加 fp16 scale 的捨入）。
+void q8_roundtrip(int dev) {
+  const int64_t n = 32 * 257;
+  std::vector<bf16> host(n);
+  for (int64_t i = 0; i < n; ++i) host[i] = __float2bfloat16(std::sin(float(i) * 0.37f) * float(1 + i % 97));
+  DevBuf src(n * sizeof(bf16), dev), q(n / 32 * 34, dev);
+  MX_CUDA(cudaMemcpy(src.get(), host.data(), n * sizeof(bf16), cudaMemcpyHostToDevice));
+  quantize_q8_0(src.as<bf16>(), n, q.get(), nullptr);
+  std::vector<uint8_t> raw(q.size());
+  MX_CUDA(cudaMemcpy(raw.data(), q.get(), raw.size(), cudaMemcpyDeviceToHost));
+  std::vector<float> back(n);
+  dequant_cpu(raw.data(), GType::Q8_0, n, back.data());
+  for (int64_t b = 0; b < n / 32; ++b) {
+    float amax = 0;
+    for (int k = 0; k < 32; ++k) amax = std::max(amax, std::fabs(__bfloat162float(host[b * 32 + k])));
+    for (int k = 0; k < 32; ++k)
+      MX_CHECK(std::fabs(back[b * 32 + k] - __bfloat162float(host[b * 32 + k])) <= amax / 127.f * 0.51f + amax * 1e-3f,
+               "Q8_0 roundtrip error too large at %lld", (long long)(b * 32 + k));
+  }
+  std::printf("GPU%d Q8_0 quantize roundtrip PASS\n", dev);
+}
 }  // namespace
 
 int main() {
@@ -168,6 +189,7 @@ int main() {
       std::printf("GPU%d %s sm_%d%d\n", dev, prop.name, prop.major, prop.minor);
       if (prop.major == 12) benchmark_device = dev;
       reference_vectors(dev);
+      q8_roundtrip(dev);
       for (auto t : types) {
         const auto n = gtype_block(t) == 1 ? 8193 : gtype_block(t) * 33;
         auto raw = random_data(t, n); std::vector<float> ref(n);

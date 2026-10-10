@@ -82,6 +82,9 @@ class H3Pipeline {
     std::mt19937_64 rng;
   };
   void ensure_dit(bool ref);
+  // 單卡顯存不夠時，取樣前卸下 VAE／視覺塔／編碼器暫存，解碼時再載回（避免 WDDM 把顯存溢出到系統記憶體）。
+  void ensure_vaes();
+  void release_aux();
   void apply_loras(const std::vector<LoraSpec>& loras);
   // pieces 依序 → 第 50 層隱藏狀態；tags 回傳每列模態（視覺區塊含 start/end 標成影片）。
   std::vector<bf16> encode_prompt(const std::vector<Piece>& pieces, const std::string& prompt, std::vector<H3Tag>& tags);

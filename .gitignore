@@ -1,6 +1,7 @@
 /build*/
 /models/
 /out/
+/_cleanup_pending/
 *.gguf
 *.safetensors
 __pycache__/
