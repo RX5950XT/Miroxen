@@ -131,7 +131,7 @@ int cmd_video(const Args& a) {
   r.height = a.geti("-H", keyed ? 0 : 480);
   r.num_frames = a.geti("--frames", 56);
   r.video_shift = float(std::atof(a.get("--shift", "12").c_str()));
-  r.ref_image_short_edge = a.geti("--ref-edge", 2048);
+  r.ref_image_short_edge = a.geti("--ref-edge", 1024);
   r.ref_native_canvas = a.get("--ref-native", "0") != "0";
   for (auto& s : a.refs) {  // Ref2VA：--ref image=圖.png / video=片.mp4 / audio=聲.wav（依提示詞順序）
     size_t eq = s.find('=');

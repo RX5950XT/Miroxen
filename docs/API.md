@@ -98,7 +98,7 @@ H3 一般生成已移除 latent 的 CPU 往返；`latent_readback` 保留欄位�
 - 引擎擋（工作會失敗，`engine_error`）：參考圖長寬比在 1:4 到 4:1；參考影片至少約 0.55 秒（要讀了才知道）。
 - 影片自帶的音軌也會一起參考。需要 Ref2VA checkpoint（`minimax_h3_ref2va_pruned-Q4_K.gguf` 等），引擎自動換 DiT。
 
-`ref_image_short_edge` 是參考圖縮放到的短邊，256 到 4096 的整數，預設 2048（官方）；調小可省時間與顯存。`ref_native_canvas` 是布林值，預設 `false`（參考影片畫布不超過輸出畫布，快約一倍）；`true` 改回官方 768p。
+`ref_image_short_edge` 是參考圖縮放到的短邊，256 到 4096 的整數，預設 1024（官方為 2048；864×480 輸出實測身分與細節一致，DiT 時間約減半）。要官方行為請填 2048。`ref_native_canvas` 是布林值，預設 `false`（參考影片畫布不超過輸出畫布，快約一倍）；`true` 改回官方 768p。
 
 `compute` 是 DiT 的運算精度，可省略（用伺服器啟動時的 `--compute`，預設 `fp8`）：`bf16`（最準）、`fp8`（MXFP8，約快 2 倍、畫質幾乎不變）、`fp4`（NVFP4，最快）。`fp8`／`fp4` 需要 Blackwell 以上的顯卡，不支援時自動退回 `bf16`。和目前載入的精度不同時會重新載入模型（Qwen-Image 約 10 秒、H3 約 40 秒）。
 

@@ -86,6 +86,7 @@ hf download pottokao/MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-GGUF MiniMax
 
 - 文字編碼器預設用 pottokao 去拒答版的 `_vis` 檔（12.6 GB，比原版 Q4_K_M 小 5.6 GB）；只有 `_vis` 版含參考圖／首尾幀需要的視覺塔。同 seed 文字生影片與參考生影片實測畫面與原版同級，精度較低（約 3.5 bit）對長提示詞的影響未量測。
 - FL2VA 與 Ref2VA 是不同 checkpoint，給參考素材時自動換用 Ref2VA。
+- 參考圖預設縮放到短邊 1024（官方 2048，可用 `--ref-edge 2048` 或 API `ref_image_short_edge` 改回）。864×480 輸出實測人物身分與細節一致，參考生影片從 104 秒降到 59 秒。
 - 參考素材最多 12 個：圖片 9 張、影片 3 段、音訊 3 段；音訊不能單獨當參考。
 - 輸出固定 24 fps，幀數向上對齊 `17n+5`、最少 22 幀（例如填 240 幀實際生成 243 幀）。高解析度長影片仍可能超出 16 GB 顯存。
 

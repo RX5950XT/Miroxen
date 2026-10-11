@@ -486,7 +486,7 @@ std::shared_ptr<Job> parse_inner(const ServerOptions& opt, Engine& engine, const
       job->video.video_shift = j["video_shift"].get<float>();
     }
     if (j.contains("ref_image_short_edge")) {
-      int e = read_int(j, "ref_image_short_edge", 2048);
+      int e = read_int(j, "ref_image_short_edge", 1024);
       if (e < 256 || e > 4096)
         throw ApiError(400, "invalid_request_error", "invalid_references", "ref_image_short_edge 必須介於 256 與 4096");
       job->video.ref_image_short_edge = e;
