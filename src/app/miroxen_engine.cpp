@@ -47,7 +47,9 @@ void fill_defaults(EngineConfig& c) {
   if (c.h3_dit_ref.empty())
     c.h3_dit_ref = first_existing(hd, {"minimax_h3_ref2va_pruned-Q4_K.gguf", "minimax_h3_ref2va_pruned-Q8_0.gguf",
                                        "minimax_h3_ref2va_pruned-Q6_K.gguf", "minimax_h3_ref2va_pruned-Q4_K_M.gguf"});
-  if (c.h3_te.empty()) c.h3_te = first_existing(hd, {"qwen3vl_32b_minimax_h3-Q4_K_M.gguf"});
+  if (c.h3_te.empty())  // pottokao 去拒答版 Q3_K_S（含視覺塔）比 unsloth Q4_K_M 小 5.6 GB，實測畫面同級
+    c.h3_te = first_existing(hd, {"MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-Q3_K_S_vis.gguf",
+                                  "qwen3vl_32b_minimax_h3-Q4_K_M.gguf"});
   if (c.h3_vvae.empty()) c.h3_vvae = first_existing(hd, {"vae/minimax_h3_video_vae_fp16.safetensors"});
   if (c.h3_avae.empty()) c.h3_avae = first_existing(hd, {"vae/minimax_h3_audio_vae_fp32.safetensors"});
   if (c.h3_tok.empty()) c.h3_tok = first_existing(hd, {"hf/tokenizer/tokenizer.json"});
@@ -181,7 +183,7 @@ class MiroxenEngine : public Engine {
                                                     : name.starts_with("minimax_h3_fl2va_");
         if (role == "dit_ref") match &= name.starts_with("minimax_h3_ref2va_");
         if (role == "text_encoder") match &= kind == "image" ? name.starts_with("Qwen3VL-8B-Instruct-") || name.starts_with("Qwen-Image-2.1-Turbo-Abliterated-Uncensored-")
-                                                             : name.starts_with("qwen3vl_32b_minimax_h3-");
+                                                             : name.starts_with("qwen3vl_32b_minimax_h3-") || (name.starts_with("MiniMax-H3-TextEncoder-") && name.ends_with("_vis.gguf"));
         if (role == "vision") match &= name.starts_with("mmproj-Qwen3VL-8B-Instruct-");
         if (role == "video_vae") match &= name.starts_with("minimax_h3_video_vae_");
         if (role == "audio_vae") match &= name.starts_with("minimax_h3_audio_vae_");

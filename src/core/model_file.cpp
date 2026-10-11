@@ -202,7 +202,8 @@ void read_gguf(const MappedFile& f, const std::string& prefix, Weights& out, Met
     WeightRef w;
     w.name = strip(c.string(), prefix);
     const auto rank = c.read<uint32_t>();
-    MX_CHECK(rank >= 1 && rank <= 4, "GGUF 張量 %s rank 無效：%u", w.name.c_str(), rank);
+    // ComfyUI 轉出的 Conv3d（Qwen3-VL patch_embed）是 5 維；記憶體排列與 4 維合併版相同
+    MX_CHECK(rank >= 1 && rank <= 5, "GGUF 張量 %s rank 無效：%u", w.name.c_str(), rank);
     for (uint32_t j = 0; j < rank; ++j) {
       const auto d = c.read<uint64_t>();
       MX_CHECK(d <= INT64_MAX, "GGUF 維度超出 int64 範圍");

@@ -73,11 +73,18 @@ hf download Qwen/Qwen3-VL-8B-Instruct-GGUF mmproj-Qwen3VL-8B-Instruct-F16.gguf -
 |---|---|---|
 | 文字／首尾幀 DiT · Q4_K | **`minimax_h3_fl2va_pruned-Q4_K.gguf`** | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) |
 | 參考生成 DiT · Q4_K | **`minimax_h3_ref2va_pruned-Q4_K.gguf`** | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) |
-| 文字／視覺編碼器 · Q4_K_M | **`qwen3vl_32b_minimax_h3-Q4_K_M.gguf`** | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) |
+| 文字／視覺編碼器 · Q3_K_S（去拒答，含視覺塔） | **`MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-Q3_K_S_vis.gguf`** | [pottokao/MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-GGUF](https://huggingface.co/pottokao/MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-GGUF) |
+| 文字／視覺編碼器 · Q4_K_M（原版，找不到上面時使用） | `qwen3vl_32b_minimax_h3-Q4_K_M.gguf` | [unsloth/MiniMax-H3-GGUF](https://huggingface.co/unsloth/MiniMax-H3-GGUF) |
 | 影片 VAE · FP16 | **`vae/minimax_h3_video_vae_fp16.safetensors`** | [unsloth 配套檔](https://huggingface.co/unsloth/MiniMax-H3-GGUF/tree/d629413c2e5b51b38c453668b75ca3b06ca92703/vae)；[Comfy-Org 原始轉換](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | 音訊 VAE · FP32 | **`vae/minimax_h3_audio_vae_fp32.safetensors`** | 同上 |
 | Tokenizer／設定 | `hf/tokenizer/` 等 | [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) |
 
+```bat
+hf download unsloth/MiniMax-H3-GGUF minimax_h3_fl2va_pruned-Q4_K.gguf minimax_h3_ref2va_pruned-Q4_K.gguf vae/minimax_h3_video_vae_fp16.safetensors vae/minimax_h3_audio_vae_fp32.safetensors --local-dir models/video/minimax-h3
+hf download pottokao/MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-GGUF MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-Q3_K_S_vis.gguf --local-dir models/video/minimax-h3
+```
+
+- 文字編碼器預設用 pottokao 去拒答版的 `_vis` 檔（12.6 GB，比原版 Q4_K_M 小 5.6 GB）；只有 `_vis` 版含參考圖／首尾幀需要的視覺塔。同 seed 文字生影片與參考生影片實測畫面與原版同級，精度較低（約 3.5 bit）對長提示詞的影響未量測。
 - FL2VA 與 Ref2VA 是不同 checkpoint，給參考素材時自動換用 Ref2VA。
 - 參考素材最多 12 個：圖片 9 張、影片 3 段、音訊 3 段；音訊不能單獨當參考。
 - 輸出固定 24 fps，幀數向上對齊 `17n+5`、最少 22 幀（例如填 240 幀實際生成 243 幀）。高解析度長影片仍可能超出 16 GB 顯存。
