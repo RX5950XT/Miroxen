@@ -26,6 +26,8 @@ void flash_attn(const bf16* q, const bf16* k, const bf16* v, bf16* o, const Attn
 // 是 bf16(fp32 累加) 的 4 倍。只支援 causal=0、D ∈ {64, 128}、kv_stride/q_stride 為 8 的倍數且 16 bytes 對齊、
 // sm_89 以上；其他情況自動改用 flash_attn。ws 至少 flash_attn_fp8_workspace(p) bytes、256 對齊。
 size_t flash_attn_fp8_workspace(const AttnParams& p);
+// 會走 FP8 路徑時，主 kernel 只讀工作區（q/k/v 已先量化進去），o 可以和 q 同一塊。
+bool flash_attn_fp8_ok(const bf16* q, const bf16* k, const bf16* v, const bf16* o, const AttnParams& p);
 void flash_attn_fp8(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams& p, void* ws,
                     cudaStream_t s);
 

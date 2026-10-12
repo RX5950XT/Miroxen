@@ -490,17 +490,27 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   const auto ts = std::chrono::steady_clock::now();
   bool tight = false;  // 單卡顯存吃緊：各階段用完就卸下
   {
+    // 依序列長度（解析度 × 幀數 × 參考素材）配置：放得下就用最大分段；不夠先卸下 VAE／編碼器，
+    // 再縮小分段直到放得下。都放不下就報錯，不讓 WDDM 溢出到系統記憶體（會慢 10～20 倍）。
     size_t free = 0, total = 0;
     MX_CUDA(cudaSetDevice(dev_.dit));
+    dit_->set_resident_blocks(0);  // 上次中途取消時可能還留著
     MX_CUDA(cudaMemGetInfo(&free, &total));
-    const size_t need = dit_->act_bytes(seq.S) + dit_->scratch_bytes() + (size_t(1) << 30);
-    if (free < need) {
+    const size_t fixed = dit_->scratch_bytes() + (size_t(1) << 30);
+    auto fits = [&](int64_t ch) { return dit_->act_bytes(seq.S, ch) + fixed <= free; };
+    if (!fits(H3Dit::kMaxChunk)) {
       tight = true;
       release_aux();
       MX_CUDA(cudaMemGetInfo(&free, &total));
-      MX_INFO("H3 單卡省顯存：取樣前卸下 VAE／編碼器暫存，GPU%d 可用 %.1f GiB（需要約 %.1f GiB）", dev_.dit,
-              free / 1073741824.0, need / 1073741824.0);
+      MX_INFO("H3 單卡省顯存：取樣前卸下 VAE／編碼器暫存，GPU%d 可用 %.1f GiB", dev_.dit, free / 1073741824.0);
     }
+    int64_t ch = H3Dit::kMaxChunk;
+    while (ch > H3Dit::kMinChunk && !fits(ch)) ch /= 2;
+    MX_CHECK(fits(ch), "GPU%d 顯存不足：序列 %lld 列需要約 %.1f GiB，可用 %.1f GiB；請降低解析度或幀數", dev_.dit,
+             (long long)seq.S, (dit_->act_bytes(seq.S, ch) + fixed) / 1073741824.0, free / 1073741824.0);
+    dit_->set_chunk(ch);
+    MX_INFO("H3 取樣顯存：序列 %lld 列、分段 %lld 列、啟用值 %.1f GiB（GPU%d 可用 %.1f GiB）", (long long)seq.S,
+            (long long)ch, dit_->act_bytes(seq.S) / 1073741824.0, dev_.dit, free / 1073741824.0);
   }
   Ctx c(dev_.dit, dit_->act_bytes(seq.S), dit_->scratch_bytes());
   {
@@ -529,6 +539,14 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
     std::string meta = strf("{\"T\":%lld,\"F_lat\":%lld,\"H\":%lld,\"W\":%lld,\"A\":%lld,\"steps\":%d}",
                             (long long)T, (long long)F_lat, (long long)H, (long long)W, (long long)A, r.steps);
     write_file((fs::path(dump) / "meta.json").string(), reinterpret_cast<const uint8_t*>(meta.data()), meta.size());
+  }
+  {
+    // 啟用值都配好後，剩下的顯存（留 768 MiB 給 cuBLAS 等零星配置）拿來常駐主幹層，省掉每步重搬與量化。
+    size_t free = 0, total = 0;
+    MX_CUDA(cudaMemGetInfo(&free, &total));
+    const size_t keep = size_t(768) << 20;
+    const int res = dit_->set_resident_blocks(free > keep ? free - keep : 0);
+    MX_INFO("H3 常駐主幹層：%d 層（GPU%d 原可用 %.1f GiB）", res, dev_.dit, free / 1073741824.0);
   }
   c.sync();
   timer.mark("dit_prepare");
@@ -562,6 +580,7 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   // 取樣暫存不再使用，解碼前釋放，避免兩階段的 GPU 記憶體重疊。
   const size_t released = c.act.capacity() + c.scratch.size() + c.lt_ws.size() + vv.size() + va.size();
   c.act = Arena{};
+  dit_->set_resident_blocks(0);  // 解碼要用這些顯存
   c.scratch = DevBuf{};
   c.lt_ws = DevBuf{};
   vv = DevBuf{};

@@ -36,6 +36,9 @@ class BlockStreamer {
   // 丟掉槽內已搬好的內容（例如 LoRA 改了），下次 acquire 重新搬。
   void invalidate();
   size_t weight_bytes() const { return total_raw_; }  // 原始權重總量（在檔案裡，不佔鎖頁記憶體）
+  // 顯存有空時把前 n 塊常駐 GPU（下次 acquire 搬一次，之後不再搬運／量化／併 LoRA），其餘照常串流。
+  // n 取 bytes_budget 放得下的最多塊，再調成讓串流塊數為偶數（雙緩衝依塊序輪流用槽）。0 = 全部釋放。回傳 n。
+  int set_resident(size_t bytes_budget);
 
  private:
   struct Block {
@@ -45,6 +48,9 @@ class BlockStreamer {
     size_t raw_bytes = 0, q_bytes = 0;
   };
   void issue_copy(int i);
+  void load(int i, int stage, char* raw, char* q);  // 第 i 塊經暫存區 stage 搬到 raw（量化模式再轉進 q）
+  int slot(int i) const { return (i - n_res_) & 1; }
+  size_t dev_bytes(const Block& b) const { return mode_ == QMode::BF16 ? b.raw_bytes : b.q_bytes; }
   void fill_stage(const Block& b, char* dst);
 
   int dev_;
@@ -59,6 +65,10 @@ class BlockStreamer {
   cudaEvent_t staged_[2] = {}, copied_[2] = {}, consumed_[2] = {};
   int slot_block_[2] = {-1, -1};  // 槽內（或正在搬入）的塊
   int last_ = -1;                  // 上一次 acquire 的塊
+  int n_res_ = 0;                  // 常駐塊數（前 n_res_ 塊）
+  std::vector<DevBuf> res_;
+  std::vector<char> res_ok_;       // 常駐內容是否有效（換 LoRA 後要重搬）
+  cudaEvent_t res_ready_ = nullptr;
 };
 
 }  // namespace mx

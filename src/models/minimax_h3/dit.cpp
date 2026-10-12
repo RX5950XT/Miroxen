@@ -11,7 +11,6 @@
 namespace mx {
 
 namespace {
-constexpr int64_t kChunk = 8192;  // qkv / MLP 分段列數，限制暫存大小
 
 std::vector<float> host_f32(const WeightRef& r) {
   std::vector<float> v(r.numel());
@@ -107,15 +106,16 @@ size_t H3Dit::scratch_bytes() const {
   return m;
 }
 
-size_t H3Dit::act_bytes(int64_t S) const {
-  size_t per_row = size_t(dim_) * (4 + 2) + size_t(inner_) * 2 * 4;
-  size_t chunk = size_t(kChunk) * std::max(3 * inner_, 3 * ffn_) * 2;
-  size_t mods = size_t(4) * 18 * dim_ * 4;
-  // 低精度模式：啟用值量化暫存與 FP8 注意力工作區（約 3·S·inner bytes）不會同時使用，取大者。
-  size_t quant = compute_ == QMode::BF16 ? 0
-                                         : std::max(size_t(std::max<int64_t>(kChunk, S)) * std::max(ffn_, inner_) * 9 / 8,
-                                                    size_t(S + 128) * inner_ * 3 + (size_t(4) << 20));
-  return per_row * S + chunk + mods + quant + (size_t(64) << 20);
+size_t H3Dit::act_bytes(int64_t S, int64_t chunk) const {
+  const size_t D = dim_, I = inner_, F = ffn_, C = chunk > 0 ? chunk : chunk_;
+  size_t per_row = D * 4 + I * 2 * 3;  // x（fp32）＋ q/k/v
+  size_t scratch = C * (D + std::max(3 * I, 3 * F)) * 2;
+  size_t mods = size_t(4) * 18 * D * 4;
+  // bf16：另配 o。低精度：線性層輸入量化暫存（chunk 內）與 FP8 注意力工作區（約 3·S·inner bytes）不同時使用。
+  size_t extra = compute_ == QMode::BF16
+                     ? size_t(S) * I * 2 + scratch
+                     : std::max(scratch + C * std::max(F, I) * 9 / 8, size_t(S + 128) * I * 3 + (size_t(4) << 20));
+  return per_row * S + extra + mods + (size_t(64) << 20);
 }
 
 std::vector<Linear*> H3Dit::linears() {
@@ -186,21 +186,28 @@ void H3Dit::attn_mlp(Ctx& c, const Block& b, float* x, int64_t S, const float* c
     const float* p = mods + g.t_idx * mod_stride + int64_t(g.tag) * 6 * D + k * D;
     return {p, p, 0};
   };
+  // AdaLN 正規化與閘控殘差逐 chunk 做（只處理 chunk 與各段的交集），不留整段 [S, D] 暫存。
+  auto each = [&](int64_t r0, int64_t n, auto&& f) {
+    for (auto& g : segs) {
+      int64_t s0 = std::max(r0, g.start), s1 = std::min(r0 + n, g.start + g.len);
+      if (s0 < s1) f(g, s0, s1 - s0);
+    }
+  };
   ArenaScope sc(c.act);
-  bf16* h = c.act.alloc_n<bf16>(S * D);
   bf16* q = c.act.alloc_n<bf16>(S * I);
   bf16* k = c.act.alloc_n<bf16>(S * I);
   bf16* v = c.act.alloc_n<bf16>(S * I);
-  bf16* o = c.act.alloc_n<bf16>(S * I);
-  for (auto& g : segs)
-    rmsnorm_mod(x + g.start * D, g.len, D, eps_, b.norm1, m(g, 1), m(g, 0), h + g.start * D, c.stream);
   const int rot = cs ? rot_ : 0;
   const RopeMode mode = cs ? ROPE_HALF : ROPE_NONE;
-  for (int64_t r0 = 0; r0 < S; r0 += kChunk) {
+  for (int64_t r0 = 0; r0 < S; r0 += chunk_) {
     ArenaScope s2(c.act);
-    int64_t n = std::min(kChunk, S - r0);
+    int64_t n = std::min(chunk_, S - r0);
+    bf16* h = c.act.alloc_n<bf16>(n * D);
     bf16* t = c.act.alloc_n<bf16>(n * 3 * I);
-    linear(c, b.qkv, h + r0 * D, n, t);
+    each(r0, n, [&](const H3Segment& g, int64_t s0, int64_t len) {
+      rmsnorm_mod(x + s0 * D, len, D, eps_, b.norm1, m(g, 1), m(g, 0), h + (s0 - r0) * D, c.stream);
+    });
+    linear(c, b.qkv, h, n, t);
     const float* cr = cs ? cs + r0 * (rot_ / 2) : nullptr;
     const float* sr = sn ? sn + r0 * (rot_ / 2) : nullptr;
     head_norm_rope(t, n, 3 * I, 0, heads_, head_dim_, b.q_norm, eps_, cr, sr, rot, mode, q + r0 * I, c.stream);
@@ -212,28 +219,35 @@ void H3Dit::attn_mlp(Ctx& c, const Block& b, float* x, int64_t S, const float* c
   ap.Sq = ap.Skv = int(S);
   ap.Hq = ap.Hkv = heads_;
   ap.D = head_dim_;
-  if (compute_ != QMode::BF16) {  // 低精度模式下注意力也用 INT8/FP8 tensor core
+  // 低精度模式下注意力也用 INT8/FP8 tensor core；該路徑先量化 q/k/v 進工作區，輸出直接覆寫 q。
+  const bool fp8 = compute_ != QMode::BF16 && flash_attn_fp8_ok(q, k, v, q, ap);
+  bf16* o = fp8 ? q : c.act.alloc_n<bf16>(S * I);
+  if (fp8) {
     ArenaScope s3(c.act);
     flash_attn_fp8(q, k, v, o, ap, c.act.alloc(flash_attn_fp8_workspace(ap)), c.stream);
   } else {
     flash_attn(q, k, v, o, ap, c.stream);
   }
-  linear(c, b.out, o, S, h);
-  for (auto& g : segs) gated_residual(x + g.start * D, h + g.start * D, g.len, D, m(g, 2), 0, c.stream);
 
-  for (auto& g : segs)
-    rmsnorm_mod(x + g.start * D, g.len, D, eps_, b.norm2, m(g, 4), m(g, 3), h + g.start * D, c.stream);
-  bf16* y = q;  // q 已用完；[S, I] ≥ [S, D]
-  for (int64_t r0 = 0; r0 < S; r0 += kChunk) {
+  // 輸出投影 → 閘控殘差 → AdaLN → SwiGLU → 閘控殘差，各列獨立，逐 chunk 做完。
+  for (int64_t r0 = 0; r0 < S; r0 += chunk_) {
     ArenaScope s2(c.act);
-    int64_t n = std::min(kChunk, S - r0);
+    int64_t n = std::min(chunk_, S - r0);
+    bf16* h = c.act.alloc_n<bf16>(n * D);
     bf16* gu = c.act.alloc_n<bf16>(n * 2 * F);
     bf16* mid = c.act.alloc_n<bf16>(n * F);
-    linear(c, b.fc1, h + r0 * D, n, gu);
+    linear(c, b.out, o + r0 * I, n, h);
+    each(r0, n, [&](const H3Segment& g, int64_t s0, int64_t len) {
+      gated_residual(x + s0 * D, h + (s0 - r0) * D, len, D, m(g, 2), 0, c.stream);
+      rmsnorm_mod(x + s0 * D, len, D, eps_, b.norm2, m(g, 4), m(g, 3), h + (s0 - r0) * D, c.stream);
+    });
+    linear(c, b.fc1, h, n, gu);
     silu_mul(gu, n, F, mid, c.stream);
-    linear(c, b.fc2, mid, n, y + r0 * D);
+    linear(c, b.fc2, mid, n, h);
+    each(r0, n, [&](const H3Segment& g, int64_t s0, int64_t len) {
+      gated_residual(x + s0 * D, h + (s0 - r0) * D, len, D, m(g, 5), 0, c.stream);
+    });
   }
-  for (auto& g : segs) gated_residual(x + g.start * D, y + g.start * D, g.len, D, m(g, 5), 0, c.stream);
 }
 
 void H3Dit::prepare(Ctx& c, H3Seq& seq, const std::vector<float>& positions, const bf16* txt) {

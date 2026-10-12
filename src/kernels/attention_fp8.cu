@@ -386,6 +386,10 @@ size_t flash_attn_fp8_workspace(const AttnParams& p) {
   return p.Sq > 0 && p.Skv > 0 && p.D > 0 ? layout(p).total : 0;
 }
 
+bool flash_attn_fp8_ok(const bf16* q, const bf16* k, const bf16* v, const bf16* o, const AttnParams& p) {
+  return fp8_ok(q, k, v, o, with_defaults(p));
+}
+
 void flash_attn_fp8(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams& p, void* ws,
                     cudaStream_t s) {
   const AttnParams a = with_defaults(p);

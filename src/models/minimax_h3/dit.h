@@ -62,11 +62,18 @@ class H3Dit {
                const std::vector<float>& timesteps, float* v_video, float* v_audio);
 
   size_t scratch_bytes() const;
-  size_t act_bytes(int64_t S) const;  // 估計一次前向需要的啟用值
+  // 估計一次前向需要的啟用值；chunk ≤ 0 用目前的分段列數。
+  size_t act_bytes(int64_t S, int64_t chunk = 0) const;
+  // qkv／輸出投影／MLP 的分段列數：越大 GEMM 越有效率，暫存也越大（約 0.1 MiB／列）。
+  static constexpr int64_t kMaxChunk = 8192, kMinChunk = 512;
+  int64_t chunk() const { return chunk_; }
+  void set_chunk(int64_t c) { chunk_ = c; }
   std::vector<Linear*> linears();
   std::vector<std::string> linear_names();
   bool resolve_lora(const std::string& name, LoraTarget& t);
   // LoRA 改了之後呼叫：FP8/FP4 串流會在搬運時把 LoRA 併進權重，已預取的槽要重搬。
+  // 取樣期間把多餘顯存拿來常駐主幹層權重；回傳常駐層數（0 = 全部串流）。
+  int set_resident_blocks(size_t bytes_budget) { return st_blocks_->set_resident(bytes_budget); }
   void invalidate_streams() {
     st_refiner_->invalidate();
     st_blocks_->invalidate();
@@ -86,6 +93,7 @@ class H3Dit {
   int heads_ = 56, head_dim_ = 128, rot_ = 96;
   QMode compute_ = QMode::BF16;
   float eps_ = 1e-5f;
+  int64_t chunk_ = kMaxChunk;
   Linear video_in_, audio_in_, cond_proj_, final_adaln_, video_out_, audio_out_;
   const float* final_norm_ = nullptr;
   const float* refiner_norm_ = nullptr;

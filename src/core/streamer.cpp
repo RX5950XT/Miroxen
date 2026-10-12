@@ -48,6 +48,7 @@ BlockStreamer::~BlockStreamer() {
   for (int s = 0; s < 2; s++)
     for (cudaEvent_t e : {staged_[s], copied_[s], consumed_[s]})
       if (e) cudaEventDestroy(e);
+  if (res_ready_) cudaEventDestroy(res_ready_);
 }
 
 static size_t align256(size_t v) { return (v + 255) / 256 * 256; }
@@ -100,6 +101,7 @@ void BlockStreamer::finalize() {
       MX_CUDA(cudaEventCreateWithFlags(e, cudaEventDisableTiming));
   }
   if (quant) tmp_ = DevBuf(tmp_max_, dev_);
+  MX_CUDA(cudaEventCreateWithFlags(&res_ready_, cudaEventDisableTiming));
   MX_CUDA(cudaStreamCreateWithFlags(&copy_, cudaStreamNonBlocking));
   if (quant) {
     MX_BLAS(cublasCreate(&blas_));
@@ -138,63 +140,93 @@ void BlockStreamer::fill_stage(const Block& b, char* dst) {
   for (auto& th : pool) th.join();
 }
 
-void BlockStreamer::issue_copy(int i) {
-  const int s = i % 2;
-  if (slot_block_[s] == i) return;
+void BlockStreamer::load(int i, int stage, char* raw, char* q) {
   const Block& b = blocks_[i];
-  // 暫存區 s 上一次的 H2D 完成後才能覆寫（通常早就完成）。
-  MX_CUDA(cudaEventSynchronize(staged_[s]));
-  fill_stage(b, static_cast<char*>(stage_[s].get()));
-  // 等這個槽的上一個使用者算完再覆寫。
+  // 暫存區上一次的 H2D 完成後才能覆寫（通常早就完成）。
+  MX_CUDA(cudaEventSynchronize(staged_[stage]));
+  fill_stage(b, static_cast<char*>(stage_[stage].get()));
+  MX_CUDA(cudaMemcpyAsync(raw, stage_[stage].get(), b.raw_bytes, cudaMemcpyHostToDevice, copy_));
+  MX_CUDA(cudaEventRecord(staged_[stage], copy_));
+  if (mode_ == QMode::BF16) return;
+  // 原始權重 → bf16 → 區塊縮放；與 c.stream 上的計算重疊。
+  for (size_t j = 0; j < b.linears.size(); j++) {
+    const Linear& l = *b.linears[j];
+    dequant_to_bf16(raw + b.raw_offs[j], l.w.type, l.in * l.out, tmp_.as<bf16>(), copy_);
+    const float one = 1.f;
+    for (auto& d : l.loras) {  // W[out,in] += s·B·A（同 DeviceWeights::merge_loras）
+      if (d->f32) continue;
+      MX_BLAS(cublasGemmEx(blas_, CUBLAS_OP_N, CUBLAS_OP_N, int(l.in), int(d->out_len), int(d->rank), &d->scale,
+                           d->A.get(), CUDA_R_16BF, int(l.in), d->B.get(), CUDA_R_16BF, int(d->rank), &one,
+                           tmp_.as<bf16>() + d->out_off * l.in, CUDA_R_16BF, int(l.in), CUBLAS_COMPUTE_32F,
+                           CUBLAS_GEMM_DEFAULT));
+    }
+    size_t sf_off, amax_off;
+    qlayout(mode_, l, sf_off, amax_off);
+    char* base = q + b.q_offs[j];
+    quantize_blockscaled(mode_, tmp_.as<bf16>(), l.in, l.out, l.in,
+                         {base, reinterpret_cast<uint8_t*>(base + sf_off), reinterpret_cast<float*>(base + amax_off)},
+                         copy_);
+  }
+}
+
+void BlockStreamer::issue_copy(int i) {
+  const int s = slot(i);
+  if (slot_block_[s] == i) return;
+  // 等這個槽的上一個使用者算完再覆寫（量化模式的 raw_[0] 只是 copy stream 上的轉換來源）。
   MX_CUDA(cudaStreamWaitEvent(copy_, consumed_[s], 0));
   const bool quant = mode_ != QMode::BF16;
-  char* raw = static_cast<char*>(raw_[quant ? 0 : s].get());
-  MX_CUDA(cudaMemcpyAsync(raw, stage_[s].get(), b.raw_bytes, cudaMemcpyHostToDevice, copy_));
-  MX_CUDA(cudaEventRecord(staged_[s], copy_));
-  if (quant) {
-    // 原始權重 → bf16 → 區塊縮放；與 c.stream 上的計算重疊。
-    for (size_t j = 0; j < b.linears.size(); j++) {
-      const Linear& l = *b.linears[j];
-      dequant_to_bf16(raw + b.raw_offs[j], l.w.type, l.in * l.out, tmp_.as<bf16>(), copy_);
-      const float one = 1.f;
-      for (auto& d : l.loras) {  // W[out,in] += s·B·A（同 DeviceWeights::merge_loras）
-        if (d->f32) continue;
-        MX_BLAS(cublasGemmEx(blas_, CUBLAS_OP_N, CUBLAS_OP_N, int(l.in), int(d->out_len), int(d->rank), &d->scale,
-                             d->A.get(), CUDA_R_16BF, int(l.in), d->B.get(), CUDA_R_16BF, int(d->rank), &one,
-                             tmp_.as<bf16>() + d->out_off * l.in, CUDA_R_16BF, int(l.in), CUBLAS_COMPUTE_32F,
-                             CUBLAS_GEMM_DEFAULT));
-      }
-      size_t sf_off, amax_off;
-      qlayout(mode_, l, sf_off, amax_off);
-      char* base = static_cast<char*>(q_[s].get()) + b.q_offs[j];
-      quantize_blockscaled(mode_, tmp_.as<bf16>(), l.in, l.out, l.in,
-                           {base, reinterpret_cast<uint8_t*>(base + sf_off), reinterpret_cast<float*>(base + amax_off)},
-                           copy_);
-    }
-  }
+  load(i, s, static_cast<char*>(raw_[quant ? 0 : s].get()), quant ? static_cast<char*>(q_[s].get()) : nullptr);
   MX_CUDA(cudaEventRecord(copied_[s], copy_));
   slot_block_[s] = i;
+}
+
+int BlockStreamer::set_resident(size_t bytes_budget) {
+  invalidate();
+  res_.clear();
+  int n = 0;
+  for (size_t used = 0; n < blocks() && used + dev_bytes(blocks_[n]) <= bytes_budget; n++) used += dev_bytes(blocks_[n]);
+  if (n > 0 && (blocks() - n) % 2) n--;
+  for (int i = 0; i < n; i++) res_.emplace_back(dev_bytes(blocks_[i]), dev_);
+  res_ok_.assign(n, 0);
+  n_res_ = n;
+  last_ = -1;
+  return n;
 }
 
 void BlockStreamer::invalidate() {
   if (copy_) MX_CUDA(cudaStreamSynchronize(copy_));
   slot_block_[0] = slot_block_[1] = -1;
+  std::fill(res_ok_.begin(), res_ok_.end(), 0);
 }
 
 void BlockStreamer::acquire(Ctx& c, int i) {
   MX_CHECK(i >= 0 && i < blocks(), "BlockStreamer：塊索引 %d 超出範圍", i);
   MX_CHECK(c.device == dev_, "BlockStreamer：Ctx 裝置不符");
-  if (last_ >= 0) MX_CUDA(cudaEventRecord(consumed_[last_ % 2], c.stream));
-  issue_copy(i);
-  const int s = i % 2;
-  MX_CUDA(cudaStreamWaitEvent(c.stream, copied_[s], 0));
+  if (last_ >= n_res_) MX_CUDA(cudaEventRecord(consumed_[slot(last_)], c.stream));
+  const bool quant = mode_ != QMode::BF16;
+  char *raw, *q;
+  if (i < n_res_) {
+    raw = q = static_cast<char*>(res_[i].get());
+    if (!res_ok_[i]) {
+      load(i, i & 1, quant ? static_cast<char*>(raw_[0].get()) : raw, q);
+      MX_CUDA(cudaEventRecord(res_ready_, copy_));
+      res_ok_[i] = 1;
+    }
+    MX_CUDA(cudaStreamWaitEvent(c.stream, res_ready_, 0));
+  } else {
+    issue_copy(i);
+    const int s = slot(i);
+    MX_CUDA(cudaStreamWaitEvent(c.stream, copied_[s], 0));
+    raw = static_cast<char*>(raw_[s].get());
+    q = quant ? static_cast<char*>(q_[s].get()) : nullptr;
+  }
   Block& b = blocks_[i];
   for (size_t j = 0; j < b.linears.size(); j++) {
     Linear& l = *b.linears[j];
-    if (mode_ == QMode::BF16) {
-      l.w.p = static_cast<char*>(raw_[s].get()) + b.raw_offs[j];
+    if (!quant) {
+      l.w.p = raw + b.raw_offs[j];
     } else {
-      char* base = static_cast<char*>(q_[s].get()) + b.q_offs[j];
+      char* base = q + b.q_offs[j];
       size_t sf_off, amax_off;
       qlayout(mode_, l, sf_off, amax_off);
       l.qw->m = {base, reinterpret_cast<uint8_t*>(base + sf_off), reinterpret_cast<float*>(base + amax_off)};
@@ -205,7 +237,10 @@ void BlockStreamer::acquire(Ctx& c, int i) {
     }
   }
   last_ = i;
-  if (blocks() > 1) issue_copy((i + 1) % blocks());
+  // 預取下一個串流塊（常駐塊跳過）。
+  int j = i + 1 < blocks() ? i + 1 : 0;
+  if (j < n_res_) j = n_res_;
+  if (j < blocks() && j != i) issue_copy(j);
 }
 
 }  // namespace mx
