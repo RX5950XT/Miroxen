@@ -1,6 +1,7 @@
 // FP8/INT8 注意力：對樸素參考實作的相對誤差，並和 bf16 FlashAttention 比速度。sm < 89 略過。
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <vector>
 
@@ -104,6 +105,11 @@ int main() {
       return 0;
     }
     MX_CUDA(cudaSetDevice(0));
+    if (std::getenv("MX_ATTN_BENCH")) {  // 只量速度：含 H3 720p 5 秒的實際尺寸（34474 列、56 頭）
+      bench(16384, 24, 128);
+      bench(34474, 56, 128);
+      return 0;
+    }
     check({300, 300, 4, 4, 128, 0, 0.f});
     check({257, 1000, 4, 2, 128, 0, 4.f});    // GQA、Skv 非 64 倍數、K 帶偏移
     check({130, 77, 2, 2, 64, 8, 2.f});       // D=64、自訂列距

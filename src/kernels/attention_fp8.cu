@@ -280,13 +280,14 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
       const float next = fmaxf(mx[r], i2f(im[r]) * sc);
       alpha[r] = ex2(mx[r] - next);  // 第一個 tile：exp2(−inf) = 0
       mx[r] = next;
-      nm[r] = -next;
+      // 機率直接算成 448·p（log2 448 併進指數，省一次乘法）；i2f 的減法也併進同一個 FFMA（只捨入一次）。
+      nm[r] = 8.807354922057604f - next - 12582912.f * sc;
     }
 #pragma unroll
     for (int n = 0; n < kK / 8; ++n)
 #pragma unroll
       for (int j = 0; j < 4; ++j) {
-        f[n][j] = ex2(fmaf(i2f(s[n][j]), sc, nm[j >> 1]));
+        f[n][j] = ex2(fmaf(__int_as_float(s[n][j] + 0x4B400000), sc, nm[j >> 1]));
         if (partial && it * kK + n * 8 + 2 * t + (j & 1) >= p.Skv) f[n][j] = 0.f;
         ts[j >> 1] += f[n][j];
       }
@@ -296,20 +297,21 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
       ts[r] += __shfl_xor_sync(0xffffffff, ts[r], 2);
       l[r] = l[r] * alpha[r] + ts[r];
     }
+    // 最大值沒變時 alpha 恰為 1（ex2(0) = 1），整個 warp 都是就跳過重新縮放（後段 tile 多半如此）。
+    if (!__all_sync(0xffffffff, alpha[0] == 1.f && alpha[1] == 1.f)) {
 #pragma unroll
-    for (int d = 0; d < D / 8; ++d)
+      for (int d = 0; d < D / 8; ++d)
 #pragma unroll
-      for (int j = 0; j < 4; ++j) acc[d][j] *= alpha[j >> 1];
+        for (int j = 0; j < 4; ++j) acc[d][j] *= alpha[j >> 1];
+    }
 
-    // O += P·V（P 放大 448 倍用滿 e4m3 範圍）。
+    // O += P·V（f 已是 448·p，用滿 e4m3 範圍）。
 #pragma unroll
     for (int kc = 0; kc < kK / 32; ++kc) {
-      const float S8 = 448.f;
-      const unsigned a[4] = {
-          pack_fp8x4(f[4 * kc][0] * S8, f[4 * kc][1] * S8, f[4 * kc + 1][0] * S8, f[4 * kc + 1][1] * S8),
-          pack_fp8x4(f[4 * kc][2] * S8, f[4 * kc][3] * S8, f[4 * kc + 1][2] * S8, f[4 * kc + 1][3] * S8),
-          pack_fp8x4(f[4 * kc + 2][0] * S8, f[4 * kc + 2][1] * S8, f[4 * kc + 3][0] * S8, f[4 * kc + 3][1] * S8),
-          pack_fp8x4(f[4 * kc + 2][2] * S8, f[4 * kc + 2][3] * S8, f[4 * kc + 3][2] * S8, f[4 * kc + 3][3] * S8)};
+      const unsigned a[4] = {pack_fp8x4(f[4 * kc][0], f[4 * kc][1], f[4 * kc + 1][0], f[4 * kc + 1][1]),
+                             pack_fp8x4(f[4 * kc][2], f[4 * kc][3], f[4 * kc + 1][2], f[4 * kc + 1][3]),
+                             pack_fp8x4(f[4 * kc + 2][0], f[4 * kc + 2][1], f[4 * kc + 3][0], f[4 * kc + 3][1]),
+                             pack_fp8x4(f[4 * kc + 2][2], f[4 * kc + 2][3], f[4 * kc + 3][2], f[4 * kc + 3][3])};
 #pragma unroll
       for (int dn = 0; dn < D / 8; dn += 2) {
         unsigned b[4];
@@ -328,7 +330,7 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
     for (int r = 0; r < 2; ++r) {
       const int row = q0 + g + r * 8, col = d * 8 + 2 * t;
       if (row >= p.Sq) continue;
-      const float inv = 1.f / (448.f * 448.f * l[r]);  // P 的 448 與 V 的 448/amax
+      const float inv = 1.f / (448.f * l[r]);  // l 已含 P 的 448；另一個 448 是 V 的 448/amax
       *reinterpret_cast<__nv_bfloat162*>(o + int64_t(row) * p.o_stride + head * D + col) =
           __floats2bfloat162_rn(acc[d][2 * r] * vh[col] * inv, acc[d][2 * r + 1] * vh[col + 1] * inv);
     }
