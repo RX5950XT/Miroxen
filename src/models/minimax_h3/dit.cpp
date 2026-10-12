@@ -187,12 +187,7 @@ void H3Dit::attn_mlp(Ctx& c, const Block& b, float* x, int64_t S, const float* c
     return {p, p, 0};
   };
   // AdaLN 正規化與閘控殘差逐 chunk 做（只處理 chunk 與各段的交集），不留整段 [S, D] 暫存。
-  auto each = [&](int64_t r0, int64_t n, auto&& f) {
-    for (auto& g : segs) {
-      int64_t s0 = std::max(r0, g.start), s1 = std::min(r0 + n, g.start + g.len);
-      if (s0 < s1) f(g, s0, s1 - s0);
-    }
-  };
+  auto each = [&](int64_t r0, int64_t n, auto&& f) { h3_for_rows(segs, r0, n, f); };
   ArenaScope sc(c.act);
   bf16* q = c.act.alloc_n<bf16>(S * I);
   bf16* k = c.act.alloc_n<bf16>(S * I);

@@ -56,6 +56,7 @@ H3Pipeline::H3Pipeline(const H3Paths& p, H3Devices d) : paths_(p), dev_(d) {
   te_ = std::make_unique<Qwen3TextEncoder>(te_st_, dev_.text, /*stream=*/true);
   te_ctx_ = std::make_unique<Ctx>(dev_.text, size_t(512) << 20, te_->scratch_bytes());
   dit_ = std::make_unique<H3Dit>(dit_st_, dev_.dit, 0, d.compute);
+  ensure_sp();
   ensure_vaes();
   MX_INFO("MiniMax-H3 管線就緒：DiT@GPU%d（串流）、文字編碼器@GPU%d（串流）、影片 VAE@GPU%d、音訊 VAE@GPU%d",
           dev_.dit, dev_.text, dev_.video_vae, dev_.audio_vae);
@@ -64,10 +65,10 @@ H3Pipeline::H3Pipeline(const H3Paths& p, H3Devices d) : paths_(p), dev_(d) {
 H3Pipeline::~H3Pipeline() = default;
 
 std::string H3Pipeline::describe() const {
-  return strf("%s · DiT %s/%s @GPU%d（串流）· TE %d 層 @GPU%d（串流）",
+  return strf("%s · DiT %s/%s @GPU%d%s（串流）· TE %d 層 @GPU%d（串流）",
               ref_active_ ? "Ref2VA" : "FL2VA",
               gtype_name((ref_active_ ? dit_ref_st_ : dit_st_).get("blocks.0.attn.qkv_proj.weight").type), qmode_name(dit_->compute()), dev_.dit,
-              te_->layers(), dev_.text);
+              dit2_ ? strf("+GPU%d 序列平行", dev_.text).c_str() : "", te_->layers(), dev_.text);
 }
 
 void H3Pipeline::ensure_vaes() {
@@ -100,9 +101,30 @@ void H3Pipeline::ensure_dit(bool ref) {
   }
   QMode q = dit_ ? dit_->compute() : dev_.compute;
   dit_.reset();  // 兩個 DiT 不同時載入
+  dit2_.reset();
   active_loras_.clear();
   dit_ = std::make_unique<H3Dit>(ref ? dit_ref_st_ : dit_st_, dev_.dit, 0, q);
   ref_active_ = ref;
+  ensure_sp();
+}
+
+void H3Pipeline::ensure_sp() {
+  auto cc = [](int dev) {
+    int major = 0, minor = 0;
+    MX_CUDA(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
+    MX_CUDA(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
+    return major * 10 + minor;
+  };
+  const char* env = std::getenv("MX_H3_SP");
+  const bool two = dev_.text != dev_.dit;
+  const bool on = env ? two && std::string(env) == "1" : two && cc(dev_.dit) >= 120 && cc(dev_.text) >= 120;
+  if (!on) {
+    dit2_.reset();
+    return;
+  }
+  if (dit2_) return;
+  dit2_ = std::make_unique<H3Dit>(ref_active_ ? dit_ref_st_ : dit_st_, dev_.text, 0, dit_->compute());
+  MX_INFO("MiniMax-H3 序列平行：GPU%d + GPU%d 各算一半列與一半注意力頭", dev_.dit, dev_.text);
 }
 
 void H3Pipeline::apply_loras(const std::vector<LoraSpec>& loras) {
@@ -110,17 +132,20 @@ void H3Pipeline::apply_loras(const std::vector<LoraSpec>& loras) {
   for (size_t i = 0; same && i < loras.size(); i++)
     same = loras[i].path == active_loras_[i].path && loras[i].scale == active_loras_[i].scale;
   if (same) return;
-  auto ls = dit_->linears();
-  clear_loras(ls);
   active_loras_.clear();
-  auto names = dit_->linear_names();
-  for (auto& l : loras) {
-    auto st = apply_lora(l.path, l.scale, dev_.dit, names,
-                         [&](const std::string& n, LoraTarget& t) { return dit_->resolve_lora(n, t); });
-    MX_CHECK(st.applied > 0, "LoRA %s 沒有任何層對應到 MiniMax-H3", l.path.c_str());
-    active_loras_.push_back(l);
+  for (auto [d, dev] : {std::pair{dit_.get(), dev_.dit}, std::pair{dit2_.get(), dev_.text}}) {
+    if (!d) continue;
+    auto ls = d->linears();
+    clear_loras(ls);
+    auto names = d->linear_names();
+    for (auto& l : loras) {
+      auto st = apply_lora(l.path, l.scale, dev, names,
+                           [&](const std::string& n, LoraTarget& t) { return d->resolve_lora(n, t); });
+      MX_CHECK(st.applied > 0, "LoRA %s 沒有任何層對應到 MiniMax-H3", l.path.c_str());
+    }
+    d->invalidate_streams();
   }
-  dit_->invalidate_streams();
+  active_loras_ = loras;
 }
 
 VisionFeatures H3Pipeline::vision(const uint8_t* rgb0, const uint8_t* rgb1, int h, int w) {
@@ -489,34 +514,66 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   // DiT 取樣（影片 shift 預設 12、音訊 3，共用步數）。timesteps：0 影片、1 音訊、2 視覺參考、3 音訊參考。
   const auto ts = std::chrono::steady_clock::now();
   bool tight = false;  // 單卡顯存吃緊：各階段用完就卸下
+  H3Dit* d2 = dit2_.get();  // 序列平行時第二張卡負責後半列
+  const int64_t half = seq.S / 2;
+  const size_t in_bytes = (vrows.size() + arows.size()) * 4;  // 第二張卡的輸入副本
+  auto act = [&](int64_t ch, bool second) {
+    if (!d2) return dit_->act_bytes(seq.S, ch);
+    return second ? d2->act_bytes_sp(seq.S, seq.S - half, ch) + in_bytes : dit_->act_bytes_sp(seq.S, half, ch);
+  };
   {
     // 依序列長度（解析度 × 幀數 × 參考素材）配置：放得下就用最大分段；不夠先卸下 VAE／編碼器，
     // 再縮小分段直到放得下。都放不下就報錯，不讓 WDDM 溢出到系統記憶體（會慢 10～20 倍）。
-    size_t free = 0, total = 0;
-    MX_CUDA(cudaSetDevice(dev_.dit));
+    size_t free[2] = {}, total = 0;
+    auto query = [&] {
+      MX_CUDA(cudaSetDevice(dev_.dit));
+      MX_CUDA(cudaMemGetInfo(&free[0], &total));
+      if (d2) {
+        MX_CUDA(cudaSetDevice(dev_.text));
+        MX_CUDA(cudaMemGetInfo(&free[1], &total));
+      }
+    };
     dit_->set_resident_blocks(0);  // 上次中途取消時可能還留著
-    MX_CUDA(cudaMemGetInfo(&free, &total));
-    const size_t fixed = dit_->scratch_bytes() + (size_t(1) << 30);
-    auto fits = [&](int64_t ch) { return dit_->act_bytes(seq.S, ch) + fixed <= free; };
+    if (d2) d2->set_resident_blocks(0);
+    query();
+    const size_t margin = size_t(1) << 30;
+    auto fits = [&](int64_t ch) {
+      return act(ch, false) + dit_->scratch_bytes() + margin <= free[0] &&
+             (!d2 || act(ch, true) + d2->scratch_bytes() + margin <= free[1]);
+    };
     if (!fits(H3Dit::kMaxChunk)) {
       tight = true;
       release_aux();
-      MX_CUDA(cudaMemGetInfo(&free, &total));
-      MX_INFO("H3 單卡省顯存：取樣前卸下 VAE／編碼器暫存，GPU%d 可用 %.1f GiB", dev_.dit, free / 1073741824.0);
+      query();
+      MX_INFO("H3 省顯存：取樣前卸下 VAE／編碼器暫存，GPU%d 可用 %.1f GiB", dev_.dit, free[0] / 1073741824.0);
     }
     int64_t ch = H3Dit::kMaxChunk;
     while (ch > H3Dit::kMinChunk && !fits(ch)) ch /= 2;
-    MX_CHECK(fits(ch), "GPU%d 顯存不足：序列 %lld 列需要約 %.1f GiB，可用 %.1f GiB；請降低解析度或幀數", dev_.dit,
-             (long long)seq.S, (dit_->act_bytes(seq.S, ch) + fixed) / 1073741824.0, free / 1073741824.0);
+    MX_CHECK(fits(ch), "顯存不足：序列 %lld 列需要約 %.1f GiB（GPU%d 可用 %.1f GiB）；請降低解析度或幀數",
+             (long long)seq.S, (act(ch, false) + dit_->scratch_bytes() + margin) / 1073741824.0, dev_.dit,
+             free[0] / 1073741824.0);
     dit_->set_chunk(ch);
-    MX_INFO("H3 取樣顯存：序列 %lld 列、分段 %lld 列、啟用值 %.1f GiB（GPU%d 可用 %.1f GiB）", (long long)seq.S,
-            (long long)ch, dit_->act_bytes(seq.S) / 1073741824.0, dev_.dit, free / 1073741824.0);
+    if (d2) d2->set_chunk(ch);
+    MX_INFO("H3 取樣顯存：序列 %lld 列、分段 %lld 列、啟用值 GPU%d %.1f GiB（可用 %.1f）%s", (long long)seq.S,
+            (long long)ch, dev_.dit, act(ch, false) / 1073741824.0, free[0] / 1073741824.0,
+            d2 ? strf("、GPU%d %.1f GiB（可用 %.1f）", dev_.text, act(ch, true) / 1073741824.0,
+                      free[1] / 1073741824.0).c_str()
+               : "");
   }
-  Ctx c(dev_.dit, dit_->act_bytes(seq.S), dit_->scratch_bytes());
+  Ctx c(dev_.dit, act(dit_->chunk(), false), dit_->scratch_bytes());
+  std::unique_ptr<Ctx> c2;
+  H3Seq seq2 = seq.layout();
   {
     DevBuf dt(p.txt.size() * 2, c.device);
     MX_CUDA(cudaMemcpy(dt.get(), p.txt.data(), p.txt.size() * 2, cudaMemcpyHostToDevice));
     dit_->prepare(c, seq, L.positions, dt.as<bf16>());
+  }
+  if (d2) {
+    c2 = std::make_unique<Ctx>(dev_.text, act(d2->chunk(), true), d2->scratch_bytes());
+    DevBuf dt(p.txt.size() * 2, c2->device);
+    MX_CUDA(cudaMemcpy(dt.get(), p.txt.data(), p.txt.size() * 2, cudaMemcpyHostToDevice));
+    d2->prepare(*c2, seq2, L.positions, dt.as<bf16>());
+    c.use();
   }
   DevBuf dv(vrows.size() * 4, c.device), da(arows.size() * 4, c.device);
   DevBuf vv(Nv * Cv * 4, c.device), va(Na * Ca * 4, c.device);
@@ -542,19 +599,25 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   }
   {
     // 啟用值都配好後，剩下的顯存（留 768 MiB 給 cuBLAS 等零星配置）拿來常駐主幹層，省掉每步重搬與量化。
-    size_t free = 0, total = 0;
-    MX_CUDA(cudaMemGetInfo(&free, &total));
     const size_t keep = size_t(768) << 20;
-    const int res = dit_->set_resident_blocks(free > keep ? free - keep : 0);
-    MX_INFO("H3 常駐主幹層：%d 層（GPU%d 原可用 %.1f GiB）", res, dev_.dit, free / 1073741824.0);
+    for (auto [d, dev] : {std::pair{dit_.get(), dev_.dit}, std::pair{d2, dev_.text}}) {
+      if (!d) continue;
+      size_t free = 0, total = 0;
+      MX_CUDA(cudaSetDevice(dev));
+      MX_CUDA(cudaMemGetInfo(&free, &total));
+      const int res = d->set_resident_blocks(free > keep ? free - keep : 0);
+      MX_INFO("H3 常駐主幹層：%d 層（GPU%d 原可用 %.1f GiB）", res, dev, free / 1073741824.0);
+    }
   }
+  c.use();
   c.sync();
   timer.mark("dit_prepare");
   for (int i = 0; i < n; i++) {
     report("denoise", i, n);
     float tv = 1.f - sv[i], ta = 1.f - sa[i];
-    dit_->forward(c, seq, dv.as<float>(), da.as<float>(), {tv, ta, std::max(tv, 0.999f), 1.f}, vv.as<float>(),
-                  va.as<float>());
+    const std::vector<float> tsv = {tv, ta, std::max(tv, 0.999f), 1.f};
+    if (d2) H3Dit::forward_sp(*dit_, c, seq, *d2, *c2, seq2, dv.as<float>(), da.as<float>(), tsv, vv.as<float>(), va.as<float>());
+    else dit_->forward(c, seq, dv.as<float>(), da.as<float>(), tsv, vv.as<float>(), va.as<float>());
     if (dump && i == 0) {
       dump_dev("v0_video.bin", vv.get(), vv.size());
       dump_dev("v0_audio.bin", va.get(), va.size());
@@ -570,6 +633,7 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
     axpy_f32(da.as<float>() + Nar * Ca, va.as<float>(), sa[i] - sa[i + 1], Na * Ca, c.stream);
   }
   c.sync();
+  if (c2) c2->sync();
   timer.mark("denoise");
   MX_INFO("H3 DiT 取樣：%d 次前向 %.1f 秒", n, std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count());
   if (dump) {
@@ -581,6 +645,8 @@ VideoResult H3Pipeline::sample_and_decode(const VideoRequest& r, Prepared& p, co
   const size_t released = c.act.capacity() + c.scratch.size() + c.lt_ws.size() + vv.size() + va.size();
   c.act = Arena{};
   dit_->set_resident_blocks(0);  // 解碼要用這些顯存
+  if (d2) d2->set_resident_blocks(0);
+  c2.reset();
   c.scratch = DevBuf{};
   c.lt_ws = DevBuf{};
   vv = DevBuf{};

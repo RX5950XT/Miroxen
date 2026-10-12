@@ -2,6 +2,7 @@
 // MiniMax-H3 Omni-Transformer（50 層 dense single-stream、5376 維、56 頭×128、模態別 AdaLN）。
 // 讀原始 MiniMax 命名的 GGUF（unsloth/leejet），目前支援 pruned 版（adaln_t_table 曲線表）。
 // 權重逐層串流：VRAM 只需兩層權重，其餘留給長序列啟用值。
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -42,7 +43,23 @@ struct H3Seq {
   }
   DevBuf cos, sin;  // [S, 48]
   DevBuf text;      // token refiner 之後的文字列 f32 [T, dim]
+  // 只複製版面、不含裝置緩衝（序列平行的第二張卡各自 prepare）。
+  H3Seq layout() const {
+    H3Seq s;
+    s.S = S, s.segs = segs, s.text_start = text_start, s.text_len = text_len, s.vref = vref, s.aref = aref;
+    s.audio_start = audio_start, s.audio_len = audio_len, s.video_start = video_start, s.video_len = video_len;
+    return s;
+  }
 };
+
+// 對列區間 [r0, r0+n) 與各段的交集呼叫 f(段, 起點列, 列數)。
+template <class F>
+inline void h3_for_rows(const std::vector<H3Segment>& segs, int64_t r0, int64_t n, F&& f) {
+  for (auto& g : segs) {
+    int64_t s0 = std::max(r0, g.start), s1 = std::min(r0 + n, g.start + g.len);
+    if (s0 < s1) f(g, s0, s1 - s0);
+  }
+}
 
 class H3Dit {
  public:
@@ -60,6 +77,13 @@ class H3Dit {
   // timesteps 為各段使用的 t 值（0..1，1=乾淨）。輸出 v_video：[video_len, 96]、v_audio：[audio_len, 32]（f32）。
   void forward(Ctx& c, H3Seq& seq, const float* video, const float* audio,
                const std::vector<float>& timesteps, float* v_video, float* v_audio);
+
+  // 序列平行（兩張卡）：a 負責前半列與前半注意力頭、b 負責後半，每層交換兩次（注意力前送 q/k/v、之後取回 o）。
+  // 兩邊各自 prepare 過同一份版面的 seq；video／audio／輸出都在 a 的裝置上。
+  static void forward_sp(H3Dit& a, Ctx& ca, H3Seq& sa, H3Dit& b, Ctx& cb, H3Seq& sb, const float* video,
+                         const float* audio, const std::vector<float>& timesteps, float* v_video, float* v_audio);
+  // 序列平行時本卡（負責 n 列與一半注意力頭）需要的啟用值；b 另外要放 video／audio 輸入副本。
+  size_t act_bytes_sp(int64_t S, int64_t n, int64_t chunk = 0) const;
 
   size_t scratch_bytes() const;
   // 估計一次前向需要的啟用值；chunk ≤ 0 用目前的分段列數。
@@ -85,6 +109,12 @@ class H3Dit {
     const float *norm1, *norm2, *q_norm, *k_norm;
   };
   void time_basis(Ctx& c, const std::vector<float>& ts, float* basis);
+  struct SpPart;
+  void sp_begin(SpPart& p, const std::vector<float>& ts);
+  void sp_qkv(int i, SpPart& p, const SpPart& o);
+  void sp_attn(SpPart& p, const SpPart& o);
+  void sp_mlp(int i, SpPart& p, const SpPart& o);
+  void sp_head(SpPart& p, const SpPart& a, float* v_video, float* v_audio);
   void attn_mlp(Ctx& c, const Block& b, float* x, int64_t S, const float* cs, const float* sn,
                 const std::vector<H3Segment>& segs, const float* mods, int64_t mod_stride);
 

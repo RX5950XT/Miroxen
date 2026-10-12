@@ -82,6 +82,8 @@ class H3Pipeline {
     std::mt19937_64 rng;
   };
   void ensure_dit(bool ref);
+  // 序列平行：兩張 sm_120 以上的卡（或 MX_H3_SP=1 強制、=0 關閉）時，第二張卡也放一份 DiT 一起取樣。
+  void ensure_sp();
   // 單卡顯存不夠時，取樣前卸下 VAE／視覺塔／編碼器暫存，解碼時再載回（避免 WDDM 把顯存溢出到系統記憶體）。
   void ensure_vaes();
   void release_aux();
@@ -99,6 +101,7 @@ class H3Pipeline {
   bool ref_active_ = false;  // 目前載入的是 Ref2VA DiT
   std::unique_ptr<Qwen3TextEncoder> te_;
   std::unique_ptr<H3Dit> dit_;
+  std::unique_ptr<H3Dit> dit2_;  // 序列平行的第二份 DiT（dev_.text 那張卡）
   std::unique_ptr<H3VideoVae> vvae_;
   std::unique_ptr<H3AudioVae> avae_;
   std::unique_ptr<Qwen3VisionEncoder> vis_;  // 32B 編碼器 GGUF 內的 visual.*，第一次用到才載入

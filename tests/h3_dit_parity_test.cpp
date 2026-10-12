@@ -68,6 +68,45 @@ int main() {
     std::printf("音訊速度：相對誤差 %.4f → %s\n", ea, ea < 0.05 ? "PASS" : "FAIL");
     fails += ev >= 0.05;
     fails += ea >= 0.05;
+
+    // 序列平行（各算一半列與一半頭）。只切列會改變 GEMM 的 M，cuBLAS 換 kernel 後 bf16 捨入不同（音訊對此很敏感），
+    // 所以拿「分段 = S/2 的單卡」當基準：同一張卡上兩邊 GEMM 形狀完全相同，結果應幾乎一致。
+    const int64_t half = L.seq.S / 2;
+    auto read = [](const DevBuf& b, size_t n) {
+      std::vector<float> h(n);
+      MX_CUDA(cudaMemcpy(h.data(), b.get(), n * 4, cudaMemcpyDeviceToHost));
+      return h;
+    };
+    const std::vector<float> ts4 = {tv, ta, std::max(tv, 0.999f), 1.f};
+    dit.set_chunk(half);
+    DevBuf bv(vin.size() * 4, 0), ba(ain.size() * 4, 0);
+    dit.forward(c, L.seq, dv.as<float>(), da.as<float>(), ts4, bv.as<float>(), ba.as<float>());
+    c.sync();
+    const auto base_v = read(bv, vin.size()), base_a = read(ba, ain.size());
+    dit.set_chunk(H3Dit::kMaxChunk);
+    auto run_sp = [&](int dev2, double tol) {
+      H3Dit dit2(st, dev2, nl);
+      H3Seq seq2 = L.seq.layout();
+      Ctx ca(0, dit.act_bytes_sp(L.seq.S, half), dit.scratch_bytes());
+      Ctx cb(dev2, dit2.act_bytes_sp(L.seq.S, L.seq.S - half) + (vin.size() + ain.size()) * 4, dit2.scratch_bytes());
+      dit.prepare(ca, L.seq, L.positions, txt.as<bf16>());
+      DevBuf txt2(tr.nbytes, dev2);
+      MX_CUDA(cudaMemcpy(txt2.get(), tr.data, tr.nbytes, cudaMemcpyHostToDevice));
+      dit2.prepare(cb, seq2, L.positions, txt2.as<bf16>());
+      DevBuf sv(vin.size() * 4, 0), sa(ain.size() * 4, 0);
+      H3Dit::forward_sp(dit, ca, L.seq, dit2, cb, seq2, dv.as<float>(), da.as<float>(), ts4, sv.as<float>(),
+                        sa.as<float>());
+      ca.sync();
+      const double e1 = rel(read(sv, vin.size()), base_v), e2 = rel(read(sa, ain.size()), base_a);
+      const bool ok = e1 < tol && e2 < tol;
+      std::printf("序列平行 GPU0+GPU%d：對同分段單卡 影片 %.5f／音訊 %.5f → %s\n", dev2, e1, e2, ok ? "PASS" : "FAIL");
+      fails += !ok;
+    };
+    run_sp(0, 1e-4);
+    int ngpu = 0;
+    MX_CUDA(cudaGetDeviceCount(&ngpu));
+    // 跨架構（例如 sm_120 + sm_86）的 kernel 不同，只能抓傳輸／分工錯誤（錯的話誤差接近 100%）。
+    if (ngpu > 1) run_sp(1, 0.2);
     return fails ? 1 : 0;
   } catch (const std::exception& e) {
     std::printf("FAIL：%s\n", e.what());
