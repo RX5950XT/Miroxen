@@ -270,6 +270,10 @@ Review：
   - `MX_ATTN_BENCH=1 build/attention_fp8_test.exe` 只量速度（含 H3 720p 5 秒的 34474 列、56 頭）。
   - 注意：專案外的獨立程式（例如微基準）沒設 `CUDA_DEVICE_ORDER=PCI_BUS_ID` 時，`CUDA_VISIBLE_DEVICES=0` 會選到 3060 Ti（預設 FASTEST_FIRST）。專案程式在 tensor.cpp 已自動設定。
 
+- **儀表板重構（2026-10-12）**：分成創作／作品庫／模型與硬體／API 四頁；創作頁三欄（設定／成品／佇列），任務改晶片、首尾幀縮圖、貼上圖片、點標籤插入提示詞。
+  成品顯示詳情與各階段耗時，可「重用設定」「沿用種子」；作品庫可篩選、重用、取消。API 的工作 `parameters` 補上 seed、cfg、負向提示、排程、video_shift、task、model_files 等可重送欄位。
+  Ref2VA 參考圖短邊預設改回與伺服器一致的 1024。驗證：`server_test` 通過、`tests/dashboard_check.js` 48 項通過（假引擎）。
+
 ## 待做
 
 - [ ] H3 bf16／fp4 乾淨基準重量（2026-10-05 量時 GPU0 有其他程式在跑：fp8 129、fp4 102、bf16 317 秒，不能和表格比）

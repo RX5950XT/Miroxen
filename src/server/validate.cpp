@@ -389,9 +389,21 @@ json job_value(const Job& job) {
   j["parameters"] = {{"width", video ? job.video.width : job.image.width},
                        {"height", video ? job.video.height : job.image.height},
                        {"steps", video ? job.video.steps : int(job.image.sigmas.empty() ? job.image.steps : job.image.sigmas.size())},
-                       {"compute", video ? job.video.compute : job.image.compute}, {"loras", ls}};
-  if (video) { j["parameters"]["num_frames"] = frames; j["parameters"]["fps"] = 24; j["parameters"]["duration_seconds"] = frames / 24.0; }
-  else j["parameters"]["model"] = job.image.model;
+                       {"compute", video ? job.video.compute : job.image.compute}, {"loras", ls},
+                       {"seed", video ? job.video.seed : job.image.seed},
+                       {"model_files", video ? job.video.model_files : job.image.model_files}};
+  auto& p = j["parameters"];
+  if (video) {
+    const auto& v = job.video;
+    p["num_frames"] = frames; p["fps"] = 24; p["duration_seconds"] = frames / 24.0;
+    p["video_shift"] = v.video_shift;
+    p["task"] = v.references.empty() ? "first_last" : "reference";
+    if (!v.references.empty()) { p["ref_image_short_edge"] = v.ref_image_short_edge; p["ref_native_canvas"] = v.ref_native_canvas; }
+  } else {
+    const auto& im = job.image;
+    p["model"] = im.model; p["cfg_scale"] = im.cfg_scale; p["negative_prompt"] = im.negative_prompt;
+    p["shift_terminal"] = im.shift_terminal; p["sigmas"] = im.sigmas; p["reference_images"] = im.ref_images.size();
+  }
   return j;
 }
 

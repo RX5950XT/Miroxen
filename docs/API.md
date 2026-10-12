@@ -176,19 +176,23 @@ H3 一般生成已移除 latent 的 CPU 往返；`latent_readback` 保留欄位�
 - `GET /v1/loras/installs`：最近的下載，`state` 為 `queued`／`downloading`／`installing`／`done`／`failed`，含已下載 `bytes` 與失敗原因 `error`；重啟後清空。
 - 兩種方式都會讀 safetensors 張量名稱自動判斷：含 `transformer_blocks` 為圖片（放 `image/`），H3 的 `blocks.`／`token_refiner` 為影片（放 `video/`）；沒有 LoRA 張量或認不出回 `400 unsupported_lora`，同名回 `400 lora_exists`，檔名不合法回 `400 invalid_lora`，網址不合法回 `400 invalid_url`。失敗不留檔。
 LoRA 清單讀取 `models/loras/` 與其 `image/`、`video/` 子目錄；請求仍使用檔名，不接受路徑。不同分類若有同名檔案，回應 `400 ambiguous_lora`，避免載入錯誤的 LoRA。
-工作物件新增 `parameters`，含輸出設定、LoRA、預計對齊後的影片幀數、24 fps 與秒數；不包含 base64 素材。`result.seconds` 仍為生成耗時，和影片播放長度不同。
+工作物件新增 `parameters`，記錄這件工作實際使用的設定（不含 base64 素材），可直接拿來重送：
+- 共通：`width`、`height`（`auto` 時為 0）、`steps`、`seed`（請求值，-1 表示隨機；實際種子看 `result.seed`）、`compute`、`loras`、`model_files`。
+- 圖片：`model`、`cfg_scale`、`negative_prompt`、`shift_terminal`、`sigmas`、`reference_images`（參考圖張數）。`prompt` 是送進引擎的完整文字（含面板任務自動加的前後綴）。
+- 影片：`num_frames`（對齊後）、`fps`（24）、`duration_seconds`、`video_shift`、`task`（`first_last` 或 `reference`）；參考生成另有 `ref_image_short_edge`、`ref_native_canvas`。
+`result.seconds` 仍為生成耗時，和影片播放長度不同。
 
-面板功能重點：
-- 創作／硬體監控／API 三個分頁；自訂 32 倍數尺寸、目標秒數和對齊後影片長度、結果下載。
-- 圖片任務：生成／編輯、透明圖、去背、局部修改。後三者是提示詞與參考圖的操作入口；局部修改需原圖＋遮罩圖，沒有像素鎖定保證。
-- 圖片模式頂端選「標準」或「Turbo」；Turbo 鎖定 8 步並隱藏排程設定。頂列標籤顯示雙卡或單卡顯存。進階設定預設收合，摘要顯示步數、CFG、種子。
-- LoRA 依模型／FL2VA／Ref2VA 篩選。圖片 LoRA（標準與 Turbo 共用）顯示強度滑桿；影片加速 LoRA 強度固定 1，勾選後套用作者排程，取消或換任務時回原版排程。API 的一般 `loras.scale` 契約不變。
-- 「安裝社群 LoRA」可拖放 `.safetensors` 上傳（顯示進度），或貼 Hugging Face／Civitai 網址下載；完成後自動出現在清單。
-- 模型檔按已安裝清單選擇；參考素材短邊與影片原生畫布可調。API 分頁可預覽／複製相同設定的完整 JSON。
-- 尺寸：圖像多一個「依參考圖比例」（送 `size:"auto"`，需要先加參考圖）；影片預設選項是 864×480、1344×768（官方）、480×864、自動。
-- 取樣排程進階區：自訂 sigma 節點、尾端拉伸（`shift_terminal`）勾選。
-- 參考生成清單：拖放圖片、影片或音訊（依序，最多 12 個），每列顯示提示詞要用的標籤（`<Picture 1>` 等）。
-- 影片 shift 欄位（`video_shift`）。
+面板功能重點（四個分頁）：
+- **創作**：左欄設定、中間成品、右欄佇列與近期（中寬度螢幕改放成品下方，手機依序往下排）。
+  - 圖片／影音切換；圖片可選「標準」或「Turbo」（Turbo 鎖定 8 步、隱藏排程）。任務用晶片切換：生成／編輯、透明背景、去背、局部修改；影音為文字／首尾幀、參考素材生成。
+  - 提示詞字數、Ctrl + Enter 生成；參考圖可拖放、選檔或 Ctrl + V 貼上。首尾幀顯示縮圖。參考生成清單的 `<Picture 1>` 等標籤點一下就插入提示詞。
+  - 尺寸晶片（含自訂 32 倍數、依參考圖比例、影片自動）；影片可用秒數或幀數設定，顯示對齊後實際長度。
+  - LoRA 依模型／任務篩選：圖片畫風 LoRA 有強度滑桿；影片加速 LoRA 強度固定 1，勾選套用作者排程，取消或換任務回原版。可拖放或貼 Hugging Face／Civitai 網址安裝。
+  - 進階設定收合，摘要顯示步數、CFG、種子、精度；內含影片 shift、自訂 sigma、尾端拉伸、模型檔與量化版本。
+  - 成品上方：重用設定（把 `parameters` 填回表單；參考素材需重新加入）、沿用種子、開新分頁、下載。下方列出模型、尺寸、步數、種子、耗時與各階段耗時（`result.timings`）。佇列中的工作可直接取消。
+- **作品庫**：最近 50 筆的卡片牆，可篩選圖片／影片／進行中／失敗，卡片上可重用設定、下載或取消。
+- **模型與硬體**：各模型狀態與載入／全部卸載；CPU、RAM、每張 GPU 的顯存、使用率、溫度、功耗。頂列的模型標籤點一下會切到這頁。
+- **API**：Base URL 與各網卡網址（可複製）、金鑰輸入、API 統計、區網使用說明、依目前設定即時產生的請求 JSON（可複製 JSON 或 curl）、端點一覽。
 
 ## 程式進入點
 

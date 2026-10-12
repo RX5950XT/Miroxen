@@ -433,6 +433,11 @@ void test_image_and_jobs(httplib::Client& cli) {
   check(done.value("status", "") == "succeeded", "SSE 結束後工作應成功");
   check(done["result"].value("url", "").find(".png") != std::string::npos, "結果網址");
   check(done["result"].contains("seed") && done["result"].contains("seconds"), "結果欄位");
+  const auto& p = done["parameters"];
+  check(p.value("steps", 0) == 12 && p.value("seed", 0) == -1 && p.contains("cfg_scale") && p.value("shift_terminal", false) &&
+        p["sigmas"].is_array() && p.value("reference_images", 9) == 0 && p["model_files"].is_object(), "圖片工作參數可重用");
+  check(video_done["parameters"].value("task", "") == "first_last" && video_done["parameters"].value("video_shift", 0.0) == 12.0,
+        "影片工作參數可重用");
   check(done["progress"].contains("stage") && done["progress"].contains("step") && done["progress"].contains("total"),
         "進度欄位");
 }

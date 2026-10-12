@@ -1,12 +1,25 @@
 "use strict";
 
 const FILE_LABEL = { dit: "DiT 權重", dit_ref: "參考生成 DiT", text_encoder: "文字編碼器", vae: "圖片 VAE", vision: "視覺編碼器", video_vae: "影片 VAE", audio_vae: "音訊 VAE" };
-const IMAGE_TASK = {
+const TASK_HELP = {
   generate: "加入參考圖即可編輯；不加參考圖則生成新圖。",
   transparent: "生成含透明度的 PNG，背景以棋盤格預覽。",
   extract: "至少加入一張原圖，提示詞指定要保留的主體。",
   mask: "加入原圖與遮罩圖，提示詞指定白色區域要改什麼。",
+  first_last: "只寫提示詞就能生成；也可加首幀、尾幀控制開頭與結尾畫面。",
+  reference: "依參考圖片、影片、音訊生成；提示詞用 <Picture 1> 這類標籤指名素材。",
 };
+// 圖片任務送出時包在使用者提示詞外的固定文字；重用設定時用同一張表拆回來。
+const TASK_WRAP = {
+  transparent: ["This is an RGBA image with transparency. ", " The background is transparent."],
+  extract: ["This is an RGBA image with transparency. Extract the subject from the input photo. ", " The background is transparent."],
+  mask: ["Picture 2 is a mask. In Picture 1, modify only inside the white area of the mask. ", ""],
+};
+
+function radioValue(name) { return (document.querySelector('input[name="' + name + '"]:checked') || {}).value; }
+function setRadio(name, value) { const el = document.querySelector('input[name="' + name + '"][value="' + value + '"]'); if (el) el.checked = true; }
+function imageTask() { return radioValue("image-task") || "generate"; }
+function videoTask() { return radioValue("video-task") || "first_last"; }
 
 function alignedFrames(frames) { return Math.ceil((Math.max(22, frames) - 5) / 17) * 17 + 5; }
 
@@ -36,30 +49,32 @@ function renderSizes() {
   $("custom-size").hidden = item[1] !== -1;
   $("size-help").textContent = item[1] === 0
     ? (state.mode === "image" ? "依最後一張參考圖比例，約 1024² 像素。" : "依首幀比例；沒有首幀時用官方 16:9 畫布。")
-    : "寬高須為 32 的倍數。" + (item[1] === -1 ? "720×1280 可改用 736×1312；輸出不會自動裁切。" : s.w + " × " + s.h + " px");
+    : item[1] === -1 ? "寬高須為 32 的倍數；720×1280 可改用 736×1312，輸出不會自動裁切。" : s.w + " × " + s.h + " px";
   if (s.w > 0 && s.h > 0) $("skeleton").style.aspectRatio = s.w + " / " + s.h;
 }
 
 function updateTasks() {
-  const image = state.mode === "image", reference = $("video-task").value === "reference";
-  $("image-task-wrap").hidden = !image;
+  const image = state.mode === "image", reference = videoTask() === "reference";
+  $("image-task").hidden = !image;
+  $("video-task").hidden = image;
+  $("refs-wrap").hidden = !image;
   $("video-inputs").hidden = image;
   $("frame-files").hidden = image || reference;
   $("vrefs-wrap").hidden = image || !reference;
-  $("mask-help").hidden = $("image-task").value !== "mask";
+  $("mask-help").hidden = imageTask() !== "mask";
   $("steps").min = image ? "1" : "2";
-  $("task-help").textContent = IMAGE_TASK[$("image-task").value];
+  $("task-help").textContent = TASK_HELP[image ? imageTask() : videoTask()];
   $("steps-help").textContent = !image ? "實際計算 " + Math.max(0, Number($("steps").value) - 1) + " 次；8 步 LoRA 填 9。"
-    : state.imageModel === TURBO_ID ? "Turbo 固定 8 步，不需調整。" : "自訂 sigma 優先於此步數。";
+    : state.imageModel === TURBO_ID ? "Turbo 固定 8 步。" : "自訂 sigma 優先於此步數。";
   $("steps").readOnly = image && state.imageModel === TURBO_ID;
-  if (typeof updateAdvancedSummary === "function" && $("adv-summary")) updateAdvancedSummary();
+  updateAdvancedSummary();
   renderLoras(state.loraRows);
   updateDuration();
 }
 
 function visibleLoras() {
   const base = (id) => id.startsWith("qwen-image-2.1") ? "qwen-image-2.1" : id;  // Turbo 與標準共用 LoRA
-  const model = base(modelId(state.mode)), task = $("video-task").value;
+  const model = base(modelId(state.mode)), task = videoTask();
   return state.loraRows.filter((row) => (row.model === "unknown" || row.model === model) &&
     (state.mode === "image" || row.task === "any" || row.task === task));
 }
@@ -87,7 +102,7 @@ function clearAcceleration() {
   $("sigmas").value = "";
   $("shift-terminal").checked = true;
   $("video-shift").value = "12";
-  $("lora-help").textContent = "已回復原版排程。";
+  $("lora-help").textContent = "";
 }
 
 function renderLoras(rows) {
@@ -115,7 +130,7 @@ function renderLoras(rows) {
     range.type = "range"; range.min = "0"; range.max = "2"; range.step = "0.05";
     range.value = String(state.loraSelections[row.name]?.scale ?? 1);
     range.setAttribute("aria-label", row.name + " 強度");
-    scale.className = "scale";
+    scale.className = "scale num";
     scale.textContent = Number(range.value).toFixed(2);
     range.addEventListener("input", () => {
       scale.textContent = Number(range.value).toFixed(2);
@@ -129,7 +144,7 @@ function renderLoras(rows) {
         applyLoraPreset(row);
       } else {
         delete state.loraSelections[row.name];
-        if (row.purpose === "acceleration") clearAcceleration();
+        if (row.purpose === "acceleration") { clearAcceleration(); $("lora-help").textContent = "已回復原版排程。"; }
       }
       renderLoras(rows); updateTasks(); updateRequestPreview();
     });
@@ -137,27 +152,27 @@ function renderLoras(rows) {
     if (row.purpose === "style") line.append(range, scale);
     box.append(line);
   });
+  const n = selectedLoras().length;
+  $("lora-summary").textContent = n ? "已選 " + n + " 個" : available.length ? available.length + " 個可用" : "";
+  if (state.activeId || state.modelChanging) box.querySelectorAll("input").forEach((el) => { el.disabled = true; });
 }
 
 function renderModelFiles() {
   const model = state.models.find((m) => m.id === modelId(state.mode));
   if (!model) return;
-  $("current-model").textContent = (MODEL_NAME[model.id] || model.id) + (model.loaded ? " · 已載入" : " · 按需載入");
   const signature = JSON.stringify([model.id, model.files, model.defaults]);
   if (signature === state.fileSignature) return;
   state.fileSignature = signature;
   const box = $("model-files");
   box.replaceChildren();
-  Object.entries(model.files || {}).forEach(([role, choices]) => {
+  const entries = Object.entries(model.files || {});
+  $("files-wrap").hidden = !entries.length;
+  entries.forEach(([role, choices]) => {
     const label = document.createElement("label"), select = document.createElement("select");
     label.className = "field";
     label.append(document.createTextNode(FILE_LABEL[role] || role));
     select.dataset.role = role;
-    const def = document.createElement("option");
-    def.value = ""; def.textContent = "預設 · " + model.defaults[role]; select.append(def);
-    choices.forEach((file) => {
-      const option = document.createElement("option"); option.value = file; option.textContent = file; select.append(option);
-    });
+    select.append(new Option("預設 · " + model.defaults[role], ""), ...choices.map((file) => new Option(file, file)));
     select.value = fileSelection(model.id)[role] || "";
     select.addEventListener("change", () => { fileSelection(model.id)[role] = select.value; updateRequestPreview(); });
     label.append(select); box.append(label);
@@ -165,11 +180,9 @@ function renderModelFiles() {
 }
 
 function requestSettings() {
-  const kind = state.mode, s = selectedSize(), task = $("image-task").value;
+  const kind = state.mode, s = selectedSize(), task = imageTask();
   let prompt = $("prompt").value.trim();
-  if (kind === "image" && task === "transparent") prompt = "This is an RGBA image with transparency. " + prompt + " The background is transparent.";
-  if (kind === "image" && task === "extract") prompt = "This is an RGBA image with transparency. Extract the subject from the input photo. " + prompt + " The background is transparent.";
-  if (kind === "image" && task === "mask") prompt = "Picture 2 is a mask. In Picture 1, modify only inside the white area of the mask. " + prompt;
+  if (kind === "image" && TASK_WRAP[task]) prompt = TASK_WRAP[task][0] + prompt + TASK_WRAP[task][1];
   const body = { type: kind, model: modelId(kind), prompt, size: sizes()[state.size][1] === 0 ? "auto" : s.w + "x" + s.h, steps: Number($("steps").value), seed: Number($("seed").value.trim() || -1) };
   if (kind === "image") {
     body.cfg_scale = Number($("cfg").value);
@@ -181,7 +194,7 @@ function requestSettings() {
   } else {
     body.num_frames = Number($("frames").value);
     body.video_shift = Number($("video-shift").value);
-    if ($("video-task").value === "reference") { body.ref_image_short_edge = Number($("ref-edge").value); body.ref_native_canvas = $("ref-native").checked; }
+    if (videoTask() === "reference") { body.ref_image_short_edge = Number($("ref-edge").value); body.ref_native_canvas = $("ref-native").checked; }
   }
   body.loras = selectedLoras();
   if ($("compute").value) body.compute = $("compute").value;
@@ -204,131 +217,36 @@ async function buildRequest() {
     if (body.sigmas && (body.sigmas.length > 200 || !body.sigmas.every((v, i, a) => Number.isFinite(v) && v > 0 && v <= 1 && (i === 0 ? v === 1 : v < a[i - 1])))) throw new Error("sigma 須從 1 開始、嚴格遞減，最多 200 個");
     if (state.refs.length) body.images = state.refs.map((ref) => ref.url);
     if (s.w === 0 && !state.refs.length) throw new Error("依參考圖比例需要先加參考圖");
-    if ($("image-task").value === "extract" && !state.refs.length) throw new Error("去背需要加入原圖");
-    if ($("image-task").value === "mask" && state.refs.length < 2) throw new Error("局部修改需要原圖與遮罩圖");
+    if (imageTask() === "extract" && !state.refs.length) throw new Error("去背需要加入原圖");
+    if (imageTask() === "mask" && state.refs.length < 2) throw new Error("局部修改需要原圖與遮罩圖");
   } else {
     if (!Number.isInteger(body.num_frames) || body.num_frames < 5 || body.num_frames > 361) throw new Error("目標幀數須為 5～361");
     if (!Number.isFinite(body.video_shift) || body.video_shift < 0.5 || body.video_shift > 50) throw new Error("影片 shift 須為 0.5～50");
-    if ($("video-task").value === "reference") {
+    if (videoTask() === "reference") {
       if (!state.vrefs.length || state.vrefs.every((r) => r.kind === "audio")) throw new Error("參考生成需要至少一張圖片或一段影片");
       if (!Number.isInteger(body.ref_image_short_edge) || body.ref_image_short_edge < 256 || body.ref_image_short_edge > 4096) throw new Error("參考圖短邊須為 256～4096 的整數");
       body.references = state.vrefs.map((r) => ({ type: r.kind, data: r.url }));
     } else {
-      if ($("first-frame").files[0]) body.first_frame = await readFile($("first-frame").files[0]);
-      if ($("last-frame").files[0]) body.last_frame = await readFile($("last-frame").files[0]);
+      if (state.frames.first) body.first_frame = state.frames.first.url;
+      if (state.frames.last) body.last_frame = state.frames.last.url;
     }
   }
   return body;
 }
 
-function updateRequestPreview() {
+function previewBody() {
   const body = requestSettings();
   if (state.mode === "image" && state.refs.length) body.images = state.refs.map((r) => "[base64: " + r.name + "]");
   if (state.mode === "video") {
-    if ($("video-task").value === "reference") body.references = state.vrefs.map((r) => ({ type: r.kind, data: "[base64: " + r.name + "]" }));
-    else ["first", "last"].forEach((key) => { const file = $(key + "-frame").files[0]; if (file) body[key + "_frame"] = "[base64: " + file.name + "]"; });
+    if (videoTask() === "reference") body.references = state.vrefs.map((r) => ({ type: r.kind, data: "[base64: " + r.name + "]" }));
+    else ["first", "last"].forEach((key) => { if (state.frames[key]) body[key + "_frame"] = "[base64: " + state.frames[key].name + "]"; });
   }
-  $("request-preview").textContent = JSON.stringify(body, null, 2);
+  return body;
 }
 
-function bytes(value) { return Number.isFinite(value) ? (value / 1073741824).toFixed(2) + " GiB" : "暫無資料"; }
-function metric(label, value) {
-  const dl = document.createElement("dl"), dt = document.createElement("dt"), dd = document.createElement("dd");
-  dt.textContent = label; dd.textContent = value; dl.append(dt, dd); return dl;
-}
-function percent(value) { return Number.isFinite(value) ? value.toFixed(1) + "%" : "暫無資料"; }
-
-function renderSystem(data) {
-  $("queue").textContent = "工作 " + data.queue_length;
-  const gpus = data.gpus || [], gb = (g) => Math.round(g.total / 1073741824);
-  $("gpu-chip").hidden = !gpus.length;
-  $("gpu-chip").textContent = gpus.length > 1 ? "雙卡 · " + gpus.map((g) => gb(g) + "G").join("＋") : gpus.length ? "單卡 · " + gb(gpus[0]) + " GB" : "";
-  $("gpu-chip").title = gpus.map((g) => "GPU " + g.index + " · " + g.name).join("\n");
-  const host = data.host || {}, proc = data.process || {}, apiData = data.api || {};
-  $("host-metrics").replaceChildren(metric("CPU 使用率", percent(host.cpu_percent)), metric("系統 RAM", bytes(host.ram_used) + " / " + bytes(host.ram_total)), metric("Miroxen RAM", bytes(proc.ram_used)), metric("Miroxen CPU", percent(proc.cpu_percent)));
-  $("api-metrics").replaceChildren(metric("服務運行", Math.floor((apiData.uptime_seconds || 0) / 60) + " 分鐘"), metric("API 請求", String(apiData.requests || 0)), metric("錯誤回應", String(apiData.errors || 0)), metric("驗證", apiData.authentication ? "需要金鑰" : "未設金鑰"));
-  const box = $("gpus"); box.replaceChildren();
-  (data.gpus || []).forEach((g) => {
-    const section = document.createElement("section"), heading = document.createElement("h2"), metrics = document.createElement("div"), bar = document.createElement("div"), fill = document.createElement("span");
-    section.className = "gpu-row"; metrics.className = "host-metrics";
-    heading.textContent = "GPU " + g.index + " · " + g.name;
-    metrics.append(metric("GPU 使用率", percent(g.utilization_percent)), metric("顯存", bytes(g.total - g.free) + " / " + bytes(g.total)), metric("溫度", Number.isFinite(g.temperature_c) ? g.temperature_c + " °C" : "暫無資料"), metric("功耗", Number.isFinite(g.power_w) ? g.power_w.toFixed(1) + " W" : "暫無資料"));
-    bar.className = "bar"; fill.style.width = (g.total ? Math.min(100, 100 * (1 - g.free / g.total)) : 0) + "%"; bar.append(fill);
-    bar.setAttribute("role", "meter"); bar.setAttribute("aria-label", g.name + " 顯存使用率"); bar.setAttribute("aria-valuemin", "0"); bar.setAttribute("aria-valuemax", "100"); bar.setAttribute("aria-valuenow", String(g.total ? Math.round(100 * (1 - g.free / g.total)) : 0));
-    section.append(heading, metrics, bar); box.append(section);
-  });
-  $("sample-time").textContent = "更新於 " + new Date().toLocaleTimeString("zh-TW");
-  $("monitor-error").textContent = "";
-  $("api-state").textContent = "已連線";
-}
-
-async function copyText(text) {
-  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
-  const field = document.createElement("textarea"), previous = document.activeElement;
-  field.value = text; field.style.position = "fixed"; field.style.opacity = "0";
-  document.body.append(field); field.select();
-  const copied = document.execCommand("copy"); field.remove(); previous?.focus({ preventScroll: true });
-  if (!copied) throw new Error("瀏覽器未允許複製，請選取網址複製。");
-}
-
-function renderNetwork(data) {
-  $("network-state").textContent = data.lan_enabled ? "區域網路已開放 · 下列為各網卡網址。" : "僅限本機連線";
-  const urls = data.urls || [];
-  const lan = location.hostname !== "127.0.0.1" && location.hostname !== "localhost" ? location.origin :
-    (urls.find((url) => /^192\.168\.|^10\./.test(new URL(url).hostname)) || urls[0]);
-  $("lan-api-example").textContent = lan ? lan + "/v1" : "尚無區網網址；服務需開放區域網路。";
-  $("lan-health-link").href = (lan || location.origin) + "/health";
-  $("network-urls").replaceChildren(...urls.map((url) => {
-    const li = document.createElement("li"), row = document.createElement("div"), a = document.createElement("a"), button = document.createElement("button"), studio = document.createElement("a");
-    row.className = "address-row"; a.className = "mono"; a.href = url + "/v1/models"; a.textContent = url + "/v1"; a.title = "查看 API 模型清單";
-    button.type = "button"; button.textContent = "複製"; button.setAttribute("aria-label", "複製 API " + url);
-    button.addEventListener("click", async () => {
-      try { await copyText(url + "/v1"); $("address-copy-status").textContent = "已複製 " + url + "/v1"; }
-      catch (e) { $("address-copy-status").textContent = e.message; }
-    });
-    studio.href = url; studio.textContent = "工作台";
-    row.append(a, button, studio); li.append(row); return li;
-  }));
-}
-
-function updateModelSummary() {
-  const loaded = state.models.find((m) => m.loaded);
-  $("model-summary").textContent = state.modelChanging ? "模型切換中…" : loaded ? (MODEL_NAME[loaded.id] || loaded.id) + " · 已載入" : "模型未載入";
-  $("model-dot").classList.toggle("on", Boolean(loaded));
-}
-
-function updateModelActions() {
-  updateModelSummary();
-  const busy = state.modelChanging || state.submitting || state.jobs.some((j) => !isTerminal(j.status));
-  $("load-model").disabled = busy;
-  $("manage-model").disabled = busy;
-  $("unload-model").disabled = busy || !state.models.some((m) => m.loaded);
-}
-
-async function controlModel(load) {
-  if (state.modelChanging) return;
-  state.modelChanging = true;
-  updateModelActions(); setBusy(true); $("generate").disabled = true;
-  $("model-action-status").textContent = load ? "載入中，請稍候…" : "卸載中…";
-  try {
-    const id = $("manage-model").value;
-    const body = { model: id, model_files: Object.fromEntries(Object.entries(fileSelection(id)).filter(([, name]) => name)) };
-    if ($("compute").value) body.compute = $("compute").value;
-    renderModels(await api("/v1/models/" + (load ? "load" : "unload"), { method: "POST", timeout: 120000, headers: { "Content-Type": "application/json" }, body: JSON.stringify(load ? body : {}) }));
-    $("model-action-status").textContent = load ? "已載入 " + body.model : "模型已卸載；下次生成會自動載入。";
-  } catch (e) { $("model-action-status").textContent = e.message; }
-  finally { state.modelChanging = false; $("generate").disabled = false; setBusy(Boolean(state.activeId)); updateModelActions(); await refreshMeta(); }
-}
-
-function applyImageModel(id) {
-  const prev = state.imageModel, turbo = id === TURBO_ID;
-  state.imageModel = id;
-  if (Number($("steps").value) === (prev === TURBO_ID ? 8 : 40)) $("steps").value = String(stepDefault("image"));
-  if (turbo) { $("steps").value = "8"; $("cfg").value = "1"; $("sigmas").value = ""; }
-  $("steps").readOnly = turbo && state.mode === "image";
-  $("sched-wrap").hidden = turbo || state.mode !== "image";
-  state.fileSignature = "";
-  renderModelFiles(); updateTasks(); updateRequestPreview();
+function updateRequestPreview() {
+  $("request-preview").textContent = JSON.stringify(previewBody(), null, 2);
+  $("prompt-count").textContent = [...$("prompt").value].length + " / 8000";
 }
 
 function updateAdvancedSummary() {
@@ -340,6 +258,30 @@ function updateAdvancedSummary() {
   $("adv-summary").textContent = parts.join(" · ");
 }
 
+function applyImageModel(id) {
+  const prev = state.imageModel, turbo = id === TURBO_ID;
+  state.imageModel = id;
+  setRadio("image-model", id);
+  if (Number($("steps").value) === (prev === TURBO_ID ? 8 : 40)) $("steps").value = String(stepDefault("image"));
+  if (turbo) { $("steps").value = "8"; $("cfg").value = "1"; $("sigmas").value = ""; }
+  $("sched-wrap").hidden = turbo || state.mode !== "image";
+  state.fileSignature = "";
+  renderModelFiles(); updateTasks(); updateRequestPreview();
+}
+
+// ---- 首尾幀 ----
+async function setFrame(key, file) {
+  const slot = $(key + "-slot"), img = slot.querySelector("img");
+  if (!file) { delete state.frames[key]; img.hidden = true; img.removeAttribute("src"); slot.classList.remove("filled"); updateRequestPreview(); return; }
+  if (!/^image\/(png|jpeg)$/.test(file.type) && !/\.(png|jpe?g)$/i.test(file.name)) { showFormError("首尾幀只接受 PNG 或 JPEG"); return; }
+  try {
+    const url = await readFile(file);
+    state.frames[key] = { name: file.name, url };
+    img.src = url; img.alt = (key === "first" ? "首幀 " : "尾幀 ") + file.name; img.hidden = false; slot.classList.add("filled");
+  } catch (e) { showFormError(e.message); }
+  updateRequestPreview();
+}
+
 // ---- 社群 LoRA 安裝 ----
 const INSTALL_STATE = { queued: "排隊中", downloading: "下載中", installing: "驗證中", done: "已安裝", failed: "失敗" };
 
@@ -347,7 +289,7 @@ function installRow(text, detail, kind) {
   const li = document.createElement("li"), title = document.createElement("span"), meta = document.createElement("span");
   li.className = "install " + (kind || "");
   title.className = "install-name"; title.textContent = text;
-  meta.className = "install-meta"; meta.textContent = detail;
+  meta.className = "install-meta num"; meta.textContent = detail;
   li.append(title, meta);
   return li;
 }
@@ -356,7 +298,7 @@ function mb(n) { return (n / 1048576).toFixed(n > 1048576 * 100 ? 0 : 1) + " MB"
 
 async function refreshInstalls() {
   let data;
-  try { data = await api("/v1/loras/installs"); } catch (e) { return; }
+  try { data = await api("/v1/loras/installs"); } catch (e) { $("lora-help").textContent = e.message; return; }
   const rows = (data && data.data) || [];
   const box = $("lora-installs");
   box.querySelectorAll(".install.remote").forEach((el) => el.remove());
@@ -410,41 +352,30 @@ function uploadLora(file) {
   xhr.send(file);
 }
 
+function bindDrop(el, onFiles) {
+  ["dragenter", "dragover"].forEach((name) => el.addEventListener(name, (ev) => { ev.preventDefault(); el.classList.add("hot"); }));
+  el.addEventListener("dragleave", () => el.classList.remove("hot"));
+  el.addEventListener("drop", (ev) => { ev.preventDefault(); el.classList.remove("hot"); onFiles(ev.dataTransfer.files); });
+}
+
 function bindControls() {
   document.querySelectorAll('input[name="image-model"]').forEach((radio) => radio.addEventListener("change", () => { if (radio.checked) applyImageModel(radio.value); }));
+  document.querySelectorAll('input[name="image-task"]').forEach((radio) => radio.addEventListener("change", () => { updateTasks(); updateRequestPreview(); }));
+  document.querySelectorAll('input[name="video-task"]').forEach((radio) => radio.addEventListener("change", () => { clearAcceleration(); updateTasks(); updateRequestPreview(); }));
   $("lora-url-install").addEventListener("click", installFromUrl);
   $("lora-url").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); installFromUrl(); } });
   $("lora-file").addEventListener("change", (ev) => { uploadLora(ev.target.files[0]); ev.target.value = ""; });
-  const ldrop = $("lora-drop");
-  ["dragenter", "dragover"].forEach((name) => ldrop.addEventListener(name, (ev) => { ev.preventDefault(); ldrop.classList.add("hot"); }));
-  ldrop.addEventListener("dragleave", () => ldrop.classList.remove("hot"));
-  ldrop.addEventListener("drop", (ev) => { ev.preventDefault(); ldrop.classList.remove("hot"); uploadLora(ev.dataTransfer.files[0]); });
+  bindDrop($("lora-drop"), (files) => uploadLora(files[0]));
   $("lora-install").addEventListener("toggle", () => { if ($("lora-install").open) refreshInstalls(); });
-  $("load-model").addEventListener("click", () => controlModel(true));
-  $("unload-model").addEventListener("click", () => controlModel(false));
-  document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => {
-    document.querySelectorAll("[data-view]").forEach((b) => { b.setAttribute("aria-pressed", String(b === button)); $(b.dataset.view).hidden = b !== button; });
-    updateRequestPreview(); refreshMeta();
-  }));
-  $("image-task").addEventListener("change", () => { updateTasks(); updateRequestPreview(); });
-  $("video-task").addEventListener("change", () => { clearAcceleration(); updateTasks(); updateRequestPreview(); });
-  $("clear-frames").addEventListener("click", () => { $("first-frame").value = ""; $("last-frame").value = ""; updateRequestPreview(); });
+  ["first", "last"].forEach((key) => {
+    $(key + "-frame").addEventListener("change", (ev) => { setFrame(key, ev.target.files[0]); ev.target.value = ""; });
+    bindDrop($(key + "-slot"), (files) => setFrame(key, files[0]));
+  });
+  $("clear-frames").addEventListener("click", () => { setFrame("first", null); setFrame("last", null); });
   $("duration").addEventListener("input", () => { const n = Number($("duration").value); if (Number.isFinite(n)) $("frames").value = Math.max(5, Math.ceil(n * 24)); updateDuration(); });
   $("frames").addEventListener("input", () => { $("duration").value = (Number($("frames").value) / 24).toFixed(2); updateDuration(); });
   $("form").addEventListener("input", () => { updateRequestPreview(); updateAdvancedSummary(); });
+  $("seed-reset").addEventListener("click", () => { $("seed").value = "-1"; updateAdvancedSummary(); updateRequestPreview(); });
   $("reload-loras").addEventListener("click", loadLoras);
-  $("api-base").textContent = location.origin + "/v1";
-  $("api-base").href = location.origin + "/v1/models";
-  $("api-base").title = "查看 API 模型清單";
-  $("copy-api-base").addEventListener("click", async () => {
-    try { await copyText($("api-base").textContent); $("address-copy-status").textContent = "已複製 " + $("api-base").textContent; }
-    catch (e) { $("address-copy-status").textContent = e.message; }
-  });
-  $("api-connection").addEventListener("submit", (ev) => { ev.preventDefault(); $("connect-api").click(); });
-  $("connect-api").addEventListener("click", async () => { state.apiKey = $("api-key").value.trim(); state.authRequired = false; closeSource(); await refreshMeta(); await loadLoras(); if (state.activeId) watch(state.activeId); });
-  $("copy-request").addEventListener("click", async () => {
-    try { await copyText(JSON.stringify(await buildRequest(), null, 2)); $("copy-status").textContent = "已複製完整 JSON，可 POST 到 /v1/jobs。"; }
-    catch (e) { $("copy-status").textContent = e.message || "複製失敗，請確認瀏覽器允許剪貼簿。"; }
-  });
   updateTasks(); updateRequestPreview(); updateAdvancedSummary();
 }
