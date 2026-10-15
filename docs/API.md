@@ -94,7 +94,7 @@ H3 一般生成已移除 latent 的 CPU 往返；`latent_readback` 保留欄位�
 
 `references` 只用於影片（Ref2VA 參考生成）：`[{"type":"image","data":"..."}, ...]`，依提示詞裡 `<Picture i>`、`<Video k>`、`<Audio j>` 的順序，`type` 是 `image`、`video` 或 `audio`，`data` 是 base64 或 data URL。圖片要是 PNG／JPEG；影片與音訊不在伺服器解碼，副檔名取自 data URL 的 MIME（`video/mp4`、`video/webm`、`video/quicktime`、`audio/wav`、`audio/mpeg`、`audio/mp4`、`audio/ogg`、`audio/flac`），之後由 ffprobe 檢查。限制：
 
-- 伺服器擋（`invalid_references`）：總共最多 12 個，圖 ≤ 9、影片 ≤ 3、音訊 ≤ 3；音訊不能單獨用；不能和 `first_frame`／`last_frame` 同時給。影片或音訊太小或解不開是 `invalid_media`。
+- 伺服器擋（`invalid_references`）：總共最多 12 個，圖 ≤ 9、影片 ≤ 3、音訊 ≤ 3；音訊不能單獨用；不能和 `first_frame`／`last_frame` 同時給；影片、音訊每段 2～15 秒，同種類合計不超過 15 秒（官方規格，以 ffprobe 讀長度）。影片或音訊太小、解不開、缺影像軌／音軌是 `invalid_media`。
 - 引擎擋（工作會失敗，`engine_error`）：參考圖長寬比在 1:4 到 4:1；參考影片至少約 0.55 秒（要讀了才知道）。
 - 影片自帶的音軌也會一起參考。需要 Ref2VA checkpoint（`minimax_h3_ref2va_pruned-Q4_K.gguf` 等），引擎自動換 DiT。
 
@@ -184,9 +184,9 @@ LoRA 清單讀取 `models/loras/` 與其 `image/`、`video/` 子目錄；請求�
 
 面板功能重點（四個分頁）：
 - **創作**：左欄設定、中間成品、右欄佇列與近期（中寬度螢幕改放成品下方，手機依序往下排）。
-  - 圖片／影音切換；圖片可選「標準」或「Turbo」（Turbo 鎖定 8 步、隱藏排程）。任務用晶片切換：生成／編輯、透明背景、去背、局部修改；影音為文字／首尾幀、參考素材生成。
+  - 圖片／影音切換；圖片可選「標準」或「Turbo」（Turbo 鎖定 8 步、隱藏排程）。任務用晶片切換：生成／編輯、透明背景、去背、局部修改（可在原圖上直接畫遮罩，輸出黑底白色 PNG 當第二張圖）；影音為文字／首尾幀、參考素材生成。
   - 提示詞字數、Ctrl + Enter 生成；參考圖可拖放、選檔或 Ctrl + V 貼上。首尾幀顯示縮圖。參考生成清單的 `<Picture 1>` 等標籤點一下就插入提示詞。
-  - 尺寸晶片（含自訂 32 倍數、依參考圖比例、影片自動）；影片可用秒數或幀數設定，顯示對齊後實際長度。
+  - 尺寸晶片（含自訂 32 倍數、依參考圖比例、影片自動；影片另有官方 21:9／4:3／1:1／3:4 比例的 768 短邊畫布）；影片可用秒數或幀數設定，顯示對齊後實際長度。
   - LoRA 依模型／任務篩選：圖片畫風 LoRA 有強度滑桿；影片加速 LoRA 強度固定 1，勾選套用作者排程，取消或換任務回原版。可拖放或貼 Hugging Face／Civitai 網址安裝。
   - 進階設定收合，摘要顯示步數、CFG、種子、精度；內含影片 shift、自訂 sigma、尾端拉伸、模型檔與量化版本。
   - 成品上方：重用設定（把 `parameters` 填回表單；參考素材需重新加入）、沿用種子、開新分頁、下載。下方列出模型、尺寸、步數、種子、耗時與各階段耗時（`result.timings`）。佇列中的工作可直接取消。

@@ -17,6 +17,11 @@ const VIDEO_SIZES = [
   ["1344×768 官方", 1344, 768],
   ["480×864", 480, 864],
   ["736×1312 直式", 736, 1312],
+  // 以下是官方其他比例在短邊 768、上限 1344×768 像素時的畫布（同 h3_canvas）
+  ["21:9 · 1536×672", 1536, 672],
+  ["4:3 · 1024×768", 1024, 768],
+  ["1:1 · 768", 768, 768],
+  ["3:4 · 768×1024", 768, 1024],
   ["自動", 0, 0],
   ["自訂", -1, -1],
 ];
@@ -138,6 +143,7 @@ function renderRefs() {
     thumb.src = ref.url; thumb.alt = "參考圖 " + (index + 1); thumb.className = "ref-thumb";
     return refItem(thumb, ref.name, () => { state.refs.splice(index, 1); renderRefs(); });
   }));
+  syncMaskPaint();
   updateRequestPreview();
 }
 
@@ -154,6 +160,56 @@ async function addFiles(fileList) {
     catch (e) { showFormError(e.message); }
   }
   renderRefs();
+}
+
+// ---- 遮罩畫筆：在第一張參考圖上塗抹，輸出同尺寸黑底白色 PNG 當第二張參考圖 ----
+function syncMaskPaint() { $("mask-paint").hidden = state.mode !== "image" || imageTask() !== "mask" || !state.refs.length; }
+
+let maskSource = null;  // 畫布對應的原圖；換了原圖才清空筆跡
+function openMaskPainter() {
+  const img = $("mask-base"), canvas = $("mask-canvas"), url = state.refs[0].url;
+  if (url === maskSource) { $("mask-dialog").showModal(); return; }
+  img.onload = () => {
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    maskSource = url;
+    $("mask-dialog").showModal();
+  };
+  img.src = url;
+}
+
+function bindMaskPainter() {
+  const canvas = $("mask-canvas"), ctx = canvas.getContext("2d");
+  let last = null;
+  const point = (ev) => { const r = canvas.getBoundingClientRect(); return [(ev.clientX - r.left) * canvas.width / r.width, (ev.clientY - r.top) * canvas.height / r.height]; };
+  const stroke = (to) => {
+    const r = canvas.getBoundingClientRect();
+    ctx.globalCompositeOperation = $("mask-erase").checked ? "destination-out" : "source-over";
+    ctx.strokeStyle = "rgb(255 40 90)";  // 只影響預覽顏色 ctx.lineCap = ctx.lineJoin = "round";
+    ctx.lineWidth = Number($("mask-brush").value) * canvas.width / r.width;  // 筆刷以螢幕像素計
+    ctx.beginPath(); ctx.moveTo(...(last || to)); ctx.lineTo(...to); ctx.stroke();
+    last = to;
+  };
+  canvas.addEventListener("pointerdown", (ev) => { canvas.setPointerCapture(ev.pointerId); last = null; stroke(point(ev)); });
+  canvas.addEventListener("pointermove", (ev) => { if (canvas.hasPointerCapture(ev.pointerId)) stroke(point(ev)); });
+  canvas.addEventListener("pointerup", () => { last = null; });
+  $("mask-brush").addEventListener("input", () => { $("mask-brush-value").textContent = $("mask-brush").value; });
+  $("mask-clear").addEventListener("click", () => ctx.clearRect(0, 0, canvas.width, canvas.height));
+  $("mask-cancel").addEventListener("click", () => $("mask-dialog").close());
+  $("mask-paint").addEventListener("click", openMaskPainter);
+  $("mask-done").addEventListener("click", () => {
+    const px = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    for (let i = 0; i < px.data.length; i += 4) {  // 有塗到（alpha > 0）就是白，其餘黑
+      const v = px.data[i + 3] > 0 ? 255 : 0;
+      px.data[i] = px.data[i + 1] = px.data[i + 2] = v; px.data[i + 3] = 255;
+    }
+    const out = document.createElement("canvas");
+    out.width = canvas.width; out.height = canvas.height;
+    out.getContext("2d").putImageData(px, 0, 0);
+    const mask = { name: "遮罩.png", url: out.toDataURL("image/png") };
+    if (state.refs.length >= 2) state.refs[1] = mask; else state.refs.push(mask);
+    $("mask-dialog").close();
+    renderRefs();
+  });
 }
 
 // ---- 模式與執行狀態 ----

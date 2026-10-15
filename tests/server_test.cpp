@@ -72,6 +72,17 @@ httplib::Result post_json(httplib::Client& cli, const std::string& path, const j
   return cli.Post(path, body.dump(), "application/json");
 }
 
+// seconds 秒的靜音 WAV（8 kHz 單聲道 16-bit），給參考音訊長度檢查用。
+std::string silent_wav_b64(int seconds) {
+  const uint32_t data = uint32_t(seconds) * 8000 * 2;
+  std::vector<uint8_t> w(44 + data, 0);
+  auto put = [&](size_t at, uint32_t v, int n) { for (int i = 0; i < n; i++) w[at + i] = uint8_t(v >> (8 * i)); };
+  std::memcpy(&w[0], "RIFF", 4), put(4, 36 + data, 4), std::memcpy(&w[8], "WAVEfmt ", 8);
+  put(16, 16, 4), put(20, 1, 2), put(22, 1, 2), put(24, 8000, 4), put(28, 16000, 4), put(32, 2, 2), put(34, 16, 2);
+  std::memcpy(&w[36], "data", 4), put(40, data, 4);
+  return "data:audio/wav;base64," + mx::b64_encode(w.data(), w.size());
+}
+
 json image_body() {
   return {{"model", "qwen-image-2.1"}, {"prompt", "一盞燈"}, {"size", "256x256"}, {"steps", 1}, {"n", 1}};
 }
@@ -283,6 +294,14 @@ void test_validation(httplib::Client& cli) {
   expect_code(post_json(cli, "/v1/videos/generations", refs), 400, "invalid_references");
   refs["references"] = "x";
   expect_code(post_json(cli, "/v1/videos/generations", refs), 400, "invalid_references");
+  std::vector<uint8_t> px(32 * 32 * 3, 90);
+  auto png = mx::encode_png(px.data(), 32, 32, 3);
+  const json pic = {{"type", "image"}, {"data", "data:image/png;base64," + mx::b64_encode(png.data(), png.size())}};
+  refs["references"] = json::array({pic, json{{"type", "audio"}, {"data", silent_wav_b64(1)}}});
+  expect_code(post_json(cli, "/v1/videos/generations", refs), 400, "invalid_references");  // 每段至少 2 秒
+  const json six = {{"type", "audio"}, {"data", silent_wav_b64(6)}};
+  refs["references"] = json::array({pic, six, six, six});
+  expect_code(post_json(cli, "/v1/videos/generations", refs), 400, "invalid_references");  // 合計 18 秒 > 15
   refs.erase("references");
   refs["video_shift"] = 0;
   expect_code(post_json(cli, "/v1/videos/generations", refs), 400, "invalid_shift");

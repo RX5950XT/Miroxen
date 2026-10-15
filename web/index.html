@@ -61,7 +61,8 @@
           <div class="block-head"><h2 class="block-title">參考圖片</h2><span id="refs-count" class="muted num">0 / 10</span></div>
           <div class="drop" id="drop"><label><input id="ref-input" class="file-input" type="file" accept="image/png,image/jpeg" multiple>拖放、貼上（Ctrl + V）或按此選擇 PNG／JPEG</label></div>
           <ul id="ref-list" class="ref-list"></ul>
-          <p id="mask-help" class="help" hidden>第一張是原圖，第二張是黑底白色的遮罩圖；提示詞描述白色區域要改什麼。模型理解遮罩，不保證外部像素完全不變。</p>
+          <p id="mask-help" class="help" hidden>第一張是原圖，第二張是黑底白色的遮罩圖（可直接在原圖上畫）；提示詞描述白色區域要改什麼。模型理解遮罩，不保證外部像素完全不變。</p>
+          <button id="mask-paint" type="button" hidden>在原圖上畫遮罩</button>
         </section>
 
         <section id="video-inputs" class="block" hidden>
@@ -76,7 +77,7 @@
           <div id="vrefs-wrap" hidden>
             <div class="block-head"><h2 class="block-title">參考素材</h2><span id="vrefs-count" class="muted num">0 / 12</span></div>
             <div class="drop" id="vdrop"><label><input id="vref-input" class="file-input" type="file" accept="image/png,image/jpeg,video/*,audio/*" multiple>拖放圖片、影片或音訊，或按此選擇</label></div>
-            <p class="help compact">圖 9、影片 3、音訊 3；提示詞用清單上的標籤指名素材。音訊需搭配圖或影片。</p>
+            <p class="help compact">圖 9、影片 3、音訊 3；影片、音訊每段 2～15 秒，各自合計不超過 15 秒。提示詞用清單上的標籤指名素材，音訊需搭配圖或影片。</p>
             <ul id="vref-list" class="ref-list"></ul>
             <details class="sub"><summary>參考素材設定</summary>
               <label class="field">參考圖短邊（像素）<input id="ref-edge" type="number" min="256" max="4096" step="32" value="1024"><span class="help">預設 1024，省時間與顯存；官方為 2048。</span></label>
@@ -237,6 +238,16 @@
       </div>
     </div>
   </main>
+  <dialog id="mask-dialog" class="mask-dialog" aria-labelledby="mask-title">
+    <div class="block-head"><h2 id="mask-title">畫遮罩</h2><span class="muted">塗抹要修改的區域</span></div>
+    <div class="mask-stage"><img id="mask-base" alt="原圖"><canvas id="mask-canvas" aria-label="遮罩畫布"></canvas></div>
+    <div class="mask-tools">
+      <label class="field mask-brush">筆刷 <span id="mask-brush-value" class="num">40</span><input id="mask-brush" type="range" min="4" max="240" value="40"></label>
+      <label class="check"><input id="mask-erase" type="checkbox">橡皮擦</label>
+      <button id="mask-clear" type="button" class="ghost">全部清除</button>
+    </div>
+    <div class="actions"><button id="mask-cancel" type="button" class="ghost">取消</button><button id="mask-done" type="button" class="primary">套用為第二張圖</button></div>
+  </dialog>
   <script src="/web/controls.js"></script><script src="/web/views.js"></script><script src="/web/app.js"></script>
 </body>
 </html>

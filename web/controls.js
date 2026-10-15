@@ -62,6 +62,7 @@ function updateTasks() {
   $("frame-files").hidden = image || reference;
   $("vrefs-wrap").hidden = image || !reference;
   $("mask-help").hidden = imageTask() !== "mask";
+  syncMaskPaint();
   $("steps").min = image ? "1" : "2";
   $("task-help").textContent = TASK_HELP[image ? imageTask() : videoTask()];
   $("steps-help").textContent = !image ? "實際計算 " + Math.max(0, Number($("steps").value) - 1) + " 次；8 步 LoRA 填 9。"
@@ -377,5 +378,6 @@ function bindControls() {
   $("form").addEventListener("input", () => { updateRequestPreview(); updateAdvancedSummary(); });
   $("seed-reset").addEventListener("click", () => { $("seed").value = "-1"; updateAdvancedSummary(); updateRequestPreview(); });
   $("reload-loras").addEventListener("click", loadLoras);
+  bindMaskPainter();
   updateTasks(); updateRequestPreview(); updateAdvancedSummary();
 }

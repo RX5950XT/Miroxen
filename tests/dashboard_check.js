@@ -52,8 +52,22 @@ async (page) => {
   await page.locator("#ref-input").setInputFiles(fixture);
   await page.waitForFunction(() => state.refs.length === 1);
   check(await rejects(), "遮罩需兩張圖");
-  await page.locator("#ref-input").setInputFiles({ ...fixture, name: "mask.png" });
+  await page.locator("#mask-paint").click();
+  await page.waitForFunction(() => $("mask-dialog").open);
+  const box = await page.locator("#mask-canvas").boundingBox();
+  await page.mouse.move(box.x + box.width * 0.3, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.7, box.y + box.height / 2, { steps: 5 });
+  await page.mouse.up();
+  await page.locator("#mask-done").click();
   await page.waitForFunction(() => state.refs.length === 2);
+  const maskPx = await page.evaluate(() => new Promise((done) => {
+    const img = new Image();
+    img.onload = () => { const c = document.createElement("canvas"); c.width = img.width; c.height = img.height; const g = c.getContext("2d"); g.drawImage(img, 0, 0);
+      done([img.width, g.getImageData(img.width / 2, img.height / 2, 1, 1).data[0], g.getImageData(2, 2, 1, 1).data[0]]); };
+    img.src = state.refs[1].url;
+  }));
+  check(maskPx[0] === 256 && maskPx[1] === 255 && maskPx[2] === 0 && !(await page.evaluate(() => $("mask-dialog").open)), "畫遮罩輸出同尺寸黑底白色 PNG");
   body = await page.evaluate(() => buildRequest());
   check(body.images.length === 2 && body.prompt.includes("Picture 2 is a mask"), "局部修改素材");
   check(await page.evaluate(() => splitTask(requestSettings().prompt)[0] === "mask"), "任務提示可拆回");
@@ -85,6 +99,9 @@ async (page) => {
 
   // 影音
   await page.locator("#mode-video").click();
+  await page.locator("#sizes button", { hasText: "21:9" }).click();
+  check((await page.evaluate(() => buildRequest())).size === "1536x672", "影片官方 21:9 畫布");
+  await page.locator("#sizes button", { hasText: "864×480" }).click();
   await page.locator("#steps").fill("1");
   check(await rejects(), "影片至少兩個取樣點");
   check(await page.locator("#loras input[type=checkbox]").count() === 2, "FL2VA LoRA 篩選");

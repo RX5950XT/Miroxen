@@ -190,6 +190,22 @@ button.pill:hover { color: var(--ink); }
 .ref-tag { color: var(--accent); cursor: pointer; flex-shrink: 0; }
 .ref-tag:hover { text-decoration: underline; }
 .frame-files { display: flex; flex-direction: column; gap: 0.5rem; }
+#mask-paint { margin-top: 0.6rem; width: 100%; }
+
+/* 遮罩畫筆：原圖上疊一層半透明畫布，筆跡顏色只用於預覽，輸出時依有無塗抹轉黑白 */
+.mask-dialog {
+  width: min(960px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 1rem;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); box-shadow: var(--shadow);
+}
+.mask-dialog[open] { display: flex; flex-direction: column; gap: 0.75rem; }
+.mask-dialog::backdrop { background: oklch(0 0 0 / 0.55); }
+.mask-stage { position: relative; align-self: center; line-height: 0; border-radius: 8px; overflow: hidden; background: var(--surface); }
+.mask-stage img { display: block; max-width: 100%; max-height: calc(100dvh - 220px); user-select: none; }
+.mask-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.6; cursor: crosshair; touch-action: none; }
+.mask-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; }
+.mask-tools .check { margin-top: 0; }
+.mask-brush { flex: 1 1 220px; flex-direction: row; align-items: center; gap: 0.5rem; }
+.mask-brush input { flex: 1; }
 .frame-files > button { align-self: flex-start; }
 .frames { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
 .frame-slot { position: relative; aspect-ratio: 16 / 10; display: grid; place-items: center; border: 1px dashed var(--line); border-radius: var(--radius); background: var(--surface); color: var(--ink-muted); font-size: 0.8125rem; cursor: pointer; overflow: hidden; transition: border-color 160ms ease-out; }

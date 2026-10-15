@@ -8,6 +8,7 @@
 #include "core/model_file.h"
 #include "models/minimax_h3/pipeline.h"
 #include "server/image_io.h"
+#include "server/media_io.h"
 
 #include "nlohmann/json.hpp"
 
@@ -325,6 +326,26 @@ void read_references(const ServerOptions& opt, const json& j, std::vector<MediaR
     throw ApiError(400, "invalid_request_error", "invalid_references", "參考最多 9 張圖、3 段影片、3 段音訊");
   if (!out.empty() && count[0] + count[1] == 0)
     throw ApiError(400, "invalid_request_error", "invalid_references", "音訊參考必須搭配至少一張圖或一段影片");
+  // 官方規格：影片、音訊每段 2～15 秒，同種類合計 ≤ 15 秒（容許 0.05 秒的封裝誤差）。
+  double total[2] = {0, 0};  // video / audio
+  for (auto& m : out) {
+    if (m.kind == "image") continue;
+    MediaInfo mi;
+    try {
+      mi = probe_media(m.path);
+    } catch (const std::exception&) {
+      throw ApiError(400, "invalid_request_error", "invalid_media", "參考" + std::string(m.kind == "video" ? "影片" : "音訊") + "無法讀取");
+    }
+    const bool video = m.kind == "video";
+    if (video ? !mi.has_video : !mi.has_audio)
+      throw ApiError(400, "invalid_request_error", "invalid_media", video ? "參考影片沒有影像軌" : "參考音訊沒有音軌");
+    if (mi.duration < 1.95 || mi.duration > 15.05)
+      throw ApiError(400, "invalid_request_error", "invalid_references",
+                     strf("參考%s每段需 2～15 秒（這段 %.1f 秒）", video ? "影片" : "音訊", mi.duration));
+    total[video ? 0 : 1] += mi.duration;
+  }
+  if (total[0] > 15.05 || total[1] > 15.05)
+    throw ApiError(400, "invalid_request_error", "invalid_references", "參考影片、音訊各自合計不能超過 15 秒");
 }
 
 void read_one_upload(const ServerOptions& opt, const json& j, const char* key, std::string& path, TempGuard& guard) {
