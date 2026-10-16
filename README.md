@@ -175,6 +175,44 @@ build\miroxen.exe video -p "A red panda eating bamboo" -W 864 -H 480 --frames 56
 圖片用 `POST /v1/images/generations`，圖片／影音非同步工作用 `POST /v1/jobs`；沒有聊天端點。
 Windows 防火牆需允許 TCP 8188 入站，可用 `http://<IP>:8188/health` 確認連通。只要本機存取時加 `--host 127.0.0.1`。
 
+## AxonDeck 整合與發行
+
+發行前需安裝上述建置工具、Git、GitHub CLI（`gh`，已登入且有 `RX5950XT/Miroxen` 發行權限），以及 PATH 中的 `ffmpeg.exe`、`ffprobe.exe`。
+
+```bat
+release.bat 0.1.0
+release.bat 0.1.1 -RebuildDeps
+release.bat 0.0.0 -DryRun -RebuildDeps
+```
+
+也可直接執行 `powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1 -Version 0.1.0`。版本只接受 `數字.數字.數字`，tag 為 `v<版本>`，已有 tag 或輸出目錄會拒絕覆寫。正式發行要求工作樹乾淨；建置、打包後印出大小與 SHA-256，再建立並推送 tag、建立正式 GitHub Release，說明使用上一個 tag 到 HEAD 的 `git log --oneline`。
+
+產物放在 `out/release/v<版本>/`，ZIP 直接從根層解開：
+
+| 固定檔名 | 根層內容 |
+|---|---|
+| `miroxen-win-x64.zip` | `miroxen.exe`、單行 UTF-8 無 BOM 的 `VERSION`（例如 `v0.1.0`）、完整原樣的 `web/` |
+| `miroxen-deps-win-x64.zip` | `cublas64_13.dll`、`cublasLt64_13.dll`、`msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`、`ffmpeg.exe`、`ffprobe.exe`、`THIRD_PARTY_NOTICES.txt` |
+
+CUDA DLL 取自 `build/CMakeCache.txt` 的 `CMAKE_CUDA_COMPILER` 所屬 Toolkit（依序找 `bin/x64`、`bin`），MSVC runtime 取 VS 2022 最新版 Redist 的 `x64/Microsoft.VC143.CRT`。FFmpeg 工具取 PATH，WinGet 符號連結會先解析成實體檔。授權與來源連結寫入 notices，包含 CUDA cuBLAS、MSVC runtime、FFmpeg GPL 建置資訊。
+
+預設直接下載並重用上一版正式 release 的 deps ZIP，保留原始位元組與 digest；只有 `-RebuildDeps` 或上一版缺少該資產時才重新打包。下載失敗會停止。`-DryRun` 只在本機建置與打包，不要求 `gh`、不連 GitHub、不修改 Git；因此 deps 也從本機重建，工作樹不乾淨只警告。
+
+AxonDeck 從 GitHub 的 **latest release** 下載上述固定檔名，以 API 回傳的 `digest`（SHA-256）驗證；deps digest 沒變就不重下。將執行檔、工作台和依賴解開到 runtime 後啟動：
+
+```bat
+miroxen.exe serve --host 127.0.0.1 --port <隨機埠> --api-key <隨機金鑰> --models <模型目錄> --out <輸出目錄> --web <runtime>\web
+```
+
+iframe 網址範例：`http://127.0.0.1:<埠>/?embed=1&theme=dark&c-accent=%23ff0000#key=<金鑰>`。
+
+- `embed=1`：隱藏頂部 Miroxen 品牌，其他控制項保留；另外顯示「重新啟動」「停止」（頂列）與「輸出資料夾」（作品庫），按下只對父視窗送 `{ type: "miroxen:host", action: "restart" | "stop" | "output" }`，由外殼執行。「模型與硬體」「API」分頁交給外殼顯示：模型清單改成右上角模型按鈕的彈出面板。
+- `theme=light|dark`：強制明暗；省略時跟隨系統。
+- `c-<name>=<CSS 顏色>`：覆寫顏色，值需 URL 編碼且通過 `CSS.supports("color", value)`；名稱只接受 `bg`、`panel`、`surface`、`surface-2`、`ink`、`ink-muted`、`line`、`accent`、`accent-ink`、`danger`、`warn`、`ok`。
+- `#key=<金鑰>`：只接受 16～128 個英數字、`_`、`-`；第一個 API 請求前套用，再從網址移除 hash。金鑰僅留在頁面記憶體，重新載入時由 AxonDeck 再提供。
+
+內嵌時父視窗可呼叫 `iframe.contentWindow.postMessage({ type: "miroxen:theme", theme: "light", colors: { accent: "#ff0000" } }, "http://127.0.0.1:<埠>")` 即時換主題。工作台只接收 `window.parent` 的訊息；主題與顏色沿用網址的驗證規則，未提供或不合法的值不套用。
+
 ## 開發
 
 | 目錄 | 內容 |

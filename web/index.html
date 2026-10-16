@@ -15,10 +15,12 @@
       <button type="button" data-view="api-panel" aria-pressed="false">API</button>
     </nav>
     <div class="top-meta">
-      <span id="connection" class="pill" role="status"><span class="dot"></span><span>連線中</span></span>
-      <button type="button" id="model-toggle" class="pill" data-goto="system" aria-label="模型狀態，前往模型管理"><span id="model-dot" class="dot"></span><span id="model-summary">模型狀態</span></button>
       <span id="gpu-chip" class="pill" hidden></span>
+      <button type="button" id="model-toggle" class="pill" data-goto="system" aria-label="模型狀態，前往模型管理"><span id="model-dot" class="dot"></span><span id="model-summary">模型狀態</span></button>
       <span id="queue" class="pill">佇列 —</span>
+      <span id="connection" class="pill" role="status"><span class="dot"></span><span>連線中</span></span>
+      <button type="button" class="pill embed-only" data-host="restart" title="重開引擎（剛下載的模型會被載入）" hidden>重新啟動</button>
+      <button type="button" class="pill embed-only" data-host="stop" title="結束引擎並釋放顯存" hidden>停止</button>
     </div>
   </header>
 
@@ -179,6 +181,7 @@
         <button type="button" data-filter="active" aria-pressed="false">進行中</button>
         <button type="button" data-filter="failed" aria-pressed="false">失敗／取消</button>
       </div>
+      <button type="button" class="pill embed-only" data-host="output" hidden>輸出資料夾</button>
     </div>
     <p class="help">伺服器保留本次執行的最近 50 筆；重啟後清空，檔案仍在 out 資料夾。</p>
     <div id="library-grid" class="library-grid"></div>

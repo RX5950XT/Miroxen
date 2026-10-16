@@ -40,6 +40,54 @@ const state = {
   fileSignature: "", apiKey: "", pollTimer: null, refreshing: false, submitting: false, authRequired: false, modelChanging: false,
 };
 
+const THEME_COLORS = ["bg", "panel", "surface", "surface-2", "ink", "ink-muted", "line", "accent", "accent-ink", "danger", "warn", "ok"];
+
+function applyTheme(theme, colors) {
+  const root = document.documentElement;
+  if (theme === "light" || theme === "dark") root.dataset.theme = theme;
+  if (!colors || typeof colors !== "object" || Array.isArray(colors)) return;
+  for (const name of THEME_COLORS) {
+    const value = colors[name];
+    if (typeof value === "string" && CSS.supports("color", value)) root.style.setProperty("--" + name, value);
+  }
+}
+
+function initEmbedding() {
+  const params = new URLSearchParams(location.search);
+  const embed = params.get("embed") === "1";
+  if (embed) document.documentElement.dataset.embed = "1";
+  applyTheme(params.get("theme"), Object.fromEntries(THEME_COLORS.map((name) => [name, params.get("c-" + name)])));
+  if (embed) window.addEventListener("message", (event) => {
+    if (event.source !== window.parent || !event.data || event.data.type !== "miroxen:theme") return;
+    applyTheme(event.data.theme, event.data.colors);
+  });
+  if (embed) embedModelPopover();
+  // 外殼（AxonDeck）管引擎程序與檔案總管：按鈕只通知 parent，訊息不帶任何秘密
+  if (embed && window.parent !== window) for (const button of document.querySelectorAll("[data-host]")) {
+    button.hidden = false;
+    button.addEventListener("click", () => window.parent.postMessage({ type: "miroxen:host", action: button.dataset.host }, "*"));
+  }
+  const key = /^#key=([A-Za-z0-9_-]{16,128})$/.exec(location.hash);
+  if (key) {
+    state.apiKey = key[1];
+    history.replaceState(history.state, "", location.pathname + location.search);
+  }
+}
+
+// 內嵌時「模型與硬體」「API」交給外殼：模型清單改成右上角模型按鈕的彈出面板（搬 DOM，id 不變，渲染照舊）
+function embedModelPopover() {
+  const section = $("models").closest(".panel");
+  section.id = "model-pop";
+  section.classList.add("model-pop");
+  section.popover = "auto";
+  document.body.append(section);
+  const toggle = $("model-toggle");
+  delete toggle.dataset.goto;
+  toggle.setAttribute("aria-label", "模型狀態，切換或卸載模型");
+  toggle.setAttribute("aria-haspopup", "dialog");
+  toggle.popoverTargetElement = section;
+}
+
 function sizes() { return state.mode === "video" ? VIDEO_SIZES : IMAGE_SIZES; }
 function isTerminal(status) { return status === "succeeded" || status === "failed" || status === "cancelled"; }
 
@@ -551,6 +599,7 @@ function bind() {
   });
 }
 
+initEmbedding();
 applyMode();
 bind();
 bindControls();
