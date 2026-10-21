@@ -5,7 +5,7 @@ Miroxen 是專為 Qwen-Image-2.1（文生圖／編輯）與 MiniMax-H3（影音�
 
 ## 建置與測試
 
-- Windows：`build.bat [build目錄]`（呼叫 vcvars64 + CMake + Ninja；CUDA 13.3，架構 sm_120a;sm_86，`a` 為 sm_120 專屬指令）。
+- Windows：`build.bat [build目錄]`（呼叫 vcvars64 + CMake + Ninja；CUDA 13.3，預設架構 sm_120a;80;86;89;90，`a` 為 sm_120 專屬指令）。
 - 測試：`ctest --test-dir build --output-on-failure`；每個 `tests/*_test.{cpp,cu}` 自動成為一個測試。
 - `src/` 下新增 `.cpp/.cu` 不需改 CMakeLists（GLOB）。
 
