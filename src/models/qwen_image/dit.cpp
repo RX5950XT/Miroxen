@@ -12,6 +12,7 @@ namespace mx {
 static float round_bf16(float v) { return __bfloat162float(__float2bfloat16(v)); }
 
 QwenImageDit::QwenImageDit(const TensorStore& st, int device, QMode compute, bool stream) : dw_(st, device) {
+  attn8_ = compute != QMode::BF16 && flash_attn_fp8_supported(device);
   if (!qmode_supported(compute, device)) {
     MX_INFO("GPU%d 不支援 %s 運算，DiT 改用 bf16", device, qmode_name(compute));
     compute = QMode::BF16;
@@ -294,7 +295,7 @@ void QwenImageDit::run_block(Ctx& c, QwenImageSeq& seq, int li, float* x, int64_
   ap.Skv = int(S);
   ap.causal = 0;
   const int64_t qoff = prefill ? T : 0;
-  if (compute_ != QMode::BF16) {  // 低精度模式下注意力也用 INT8/FP8 tensor core
+  if (attn8_) {  // 低精度模式下注意力也用 INT8/FP8 tensor core
     ArenaScope s3(c.act);
     flash_attn_fp8(q + qoff * dim, k, v, tmp + qoff * dim, ap, c.act.alloc(flash_attn_fp8_workspace(ap)), c.stream);
   } else {
