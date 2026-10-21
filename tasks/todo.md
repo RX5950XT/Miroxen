@@ -1,5 +1,10 @@
 # Miroxen 任務清單
 
+## 專案垃圾清理（2026-10-21）
+- [x] 刪除已合併的 `feat/linux-colab-build`（本機與遠端）
+- [x] 刪除 `out/trash`（已移除的 Viggle／Turbo8 加速 LoRA，2.6 GB）、`out/bench-720p` 舊效能暫存、空的 `out/tmp`、`out/` 根目錄測試圖、`.playwright-cli`、`tools/perf/__pycache__`；更早隔離的原版 DiT／未使用模型資料在本輪開始前已不存在
+- 保留：`models/`、`out/generated`、`out/qa`、`out/reports`、`out/logs`、`out/release`、`build/`
+
 ## Linux / Colab 建置支援（2026-10-19）
 - [x] Linux CUDA 編譯旗標、系統連結、build.sh 與 README 建置說明
 - [x] Linux /proc 與 NVML 遙測、工作台靜態路徑
@@ -71,7 +76,7 @@ Review：566 個檔案已集中隔離，映射在該目錄的 `manifest.json`；
 - [x] 核對 runtime、儀表板選項及數值測試依賴，保留可用權重與必要 HF VAE
 - [x] 移出重複 HF snapshots、歷史 H3 dump 與未引用的四層 reference
 - [x] 驗證保留檔案及服務狀態，記錄隔離結果
-- [ ] 實際刪除隔離資料（自動審查拒絕，未釋放容量）
+- [x] 實際刪除隔離資料（自動審查拒絕，未釋放容量） → 2026-10-21 已清（見「專案垃圾清理」）
 
 Review：
 - `hf/FL2VA`、`hf/Ref2VA` 是無權重 shards 的重複 snapshot；四個 `models/ref/h3_dump*` 為歷史除錯輸出，`h3_dit_ref_4l.safetensors` 沒有現行 caller。339 檔共 399,897,264 bytes（381.37 MiB）已移至 `out/trash/unused-model-data-20261008`；可選權重、LoRA、實用 reference 與 HF VAE 均保留。
@@ -83,7 +88,7 @@ Review：
 - [x] 同步預設、CLI／API、測試與來源文件，UC-Q8_0 為圖片唯一預設
 - [x] out 零散作品分類、垃圾隔離，保留生成作品及必要測試資料
 - [x] 建置、受影響測試與實際圖／影音 API 驗證，恢復儀表板
-- [ ] 刪除原版圖片 DiT 與隔離垃圾（自動安全審查拒絕，未釋放容量）
+- [x] 刪除原版圖片 DiT 與隔離垃圾（自動安全審查拒絕，未釋放容量） → 2026-10-21 已清（見「專案垃圾清理」）
 
 Review：
 - `models/image/qwen-image-2.1`、`models/video/minimax-h3` 分開存放模型；LoRA 分為 `models/loras/image`／`video`。官方 TE、vision、VAE 與 `models/ref` 數值資料保留；使用者准刪範圍按原版圖片 DiT 解讀，沒有刪除必要的官方元件。
@@ -98,7 +103,7 @@ Review：
 ### 提交、推送與垃圾清理（2026-10-07）
 - [x] 檢查提交範圍、既有驗證與 staged diff，提交已完成的專案變更
 - [x] 確認 Git 遠端，推送並比對遠端 HEAD
-- [ ] 清理確定可刪的暫存，保留模型、生成作品、驗證資料與運行服務
+- [x] 清理確定可刪的暫存，保留模型、生成作品、驗證資料與運行服務 → 2026-10-21 已清（見「專案垃圾清理」）
 
 Review：
 - 已提交 `baaddc8`，共 41 個本輪相關檔案；`git diff --cached --check` 通過，模型、生成檔與 Python 快取未提交。建置、GPU／API／瀏覽器驗證見以下各輪 Review。
@@ -129,7 +134,7 @@ Review：
 - [x] 下載、SHA-256 校驗與切換 UC-Q8_0，實際生成驗證
 - [x] 重寫 README，逐一標示模型／編碼器／VAE／LoRA 來源及原版步數
 - [x] 整理 QA 輸出、隔離確定無用的暫存並驗證受影響範圍
-- [ ] 刪除隔離暫存（自動安全審查拒絕刪除指令，未提供 policy 以外的詳細原因）
+- [x] 刪除隔離暫存（自動安全審查拒絕刪除指令，未提供 policy 以外的詳細原因） → 2026-10-21 已清（見「專案垃圾清理」）
 
 
 Review：
