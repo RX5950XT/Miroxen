@@ -32,6 +32,11 @@
 - `__nv_cvt_float2_to_fp4x2` 的硬體指令只在 `sm_120a` 這類架構專屬目標才會產生，通用 sm_120 會退回軟體模擬（慢 2 倍以上）；blockscale.cu 改用門檻比較編碼，兩種目標都快。
 - 驗證排列：把量化結果在主機端照格式解回 f32 做 GEMM 比對，排列錯會直接對不上（tests/blockscale_test.cpp）。
 
+## Linux nvcc 錯編（2026-10-19）
+- 症狀：Linux 上 `dequant_test` 的 Q8_0 roundtrip 失敗，fp16 縮放值低位元組變 0（`33c8`→`3300`）；同步、記憶體屏障都無關。
+- 根因：CUDA 12.8 與 13.0 的 nvcc 把 `uint8_t(__half_as_ushort(h) & 255)`（含 `memcpy` 半精度到位元組）錯編成 `F2I.U8.F16`（把 half 的**數值**轉整數）。Windows 13.3／13.4 與 Linux 13.3 正常。
+- 規則：Linux 一律用 CUDA ≥ 13.3 建置（`build.sh` 會擋）。數值怪異先用最小 kernel＋`cuobjdump -sass` 看指令，不要先懷疑同步。
+
 ## nvcc 與中文字串
 - `.cu` 檔的 `MX_CHECK` 訊息含全形字元會被 nvcc 前端讀壞（missing closing quote），`.cu` 一律用英文訊息；
   測試若要中文訊息就寫成 `.cpp`。

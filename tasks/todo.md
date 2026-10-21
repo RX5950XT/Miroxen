@@ -1,5 +1,18 @@
 # Miroxen 任務清單
 
+## Linux / Colab 建置支援（2026-10-19）
+- [x] Linux CUDA 編譯旗標、系統連結、build.sh 與 README 建置說明
+- [x] Linux /proc 與 NVML 遙測、工作台靜態路徑
+- [x] sm_120a／86 全建置、sm_90／80 主程式建置與服務驗收
+- [x] `dequant_test` 的 Q8_0 roundtrip 失敗：根因是 Linux nvcc 12.8／13.0 錯編（見 lessons），改用 CUDA 13.3 後全過
+
+Review：
+- Linux 使用 GCC 13.3／CUDA 13.3。現有精度分派在非 Blackwell GPU 將圖片／影片 DiT 與影片 VAE 切到 BF16，FP8 attention 只在 sm_89 以上且走低精度請求時才執行。CUDA 12.8 曾讓 Q8_0 roundtrip 失敗，根因見 lessons。
+- CUDA 13.3 重建（`120a;80;86;89;90`）：`ctest` 20 項中 19 pass、`qwen_dit_parity_test` 缺參考資料 skip（含本機模型的 tokenizer／H3 parity／VAE 測試）。
+- WSL 實機（5060 Ti 單卡、Linux 無 WDDM）：Turbo 1024² 8 步 5.66 秒、標準 40 步 25.5 秒、影片 864×480 56 幀 4 步 LoRA 27.1 秒；畫面與影片目視正常。
+- 從 `/tmp` 啟動 `~/mx-build/miroxen serve --host 127.0.0.1 --port 18188`：`/health` 回 `{"status":"ok"}`、`/` 回 HTTP 200（20206 bytes）；第二次 `/v1/system` 回 CPU 0.94%、RAM、process 及兩張 GPU 利用率／溫度／功耗。程序已關閉。
+- GPU 讀數改為動態載入 `libnvidia-ml.so.1`（與 Windows 共用 NVML 程式碼），不再每次輪詢都啟動 `nvidia-smi`。
+
 ## 計畫
 
 ### Turbo 生圖、單卡 8G／16G、社群 LoRA、儀表板（2026-10-11）

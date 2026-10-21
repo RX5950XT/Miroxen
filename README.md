@@ -27,6 +27,10 @@ build\miroxen.exe serve --port 8188
 
 `build.bat` 會固定 UTF-8 字碼頁，讓中文版 MSVC 的標頭依賴能被 Ninja 正確記錄。
 
+### Linux / Colab 建置
+
+安裝 **CUDA ≥ 13.3**（12.8／13.0 的 nvcc 會錯編 Q8_0 量化，`build.sh` 會擋下）、CMake ≥ 3.28、Ninja 與 ffmpeg 後，在 Linux 執行 `CUDACXX=/usr/local/cuda-13.3/bin/nvcc ./build.sh ~/mx-build`；預設編譯 sm_120a／80／86／89／90（Windows 的 `build.bat` 相同），也可用 `CUDA_ARCHS="120a;86"` 指定目標。啟動工作台可用 `~/mx-build/miroxen serve --host 0.0.0.0 --port 8188`；sm_90／80 會使用 BF16 運算後備路徑。
+
 ## 工作台
 
 - **創作**：圖片（標準／Turbo）或影音、參考素材、LoRA、模型檔與量化版本、運算精度與取樣設定。進階設定預設收合，摘要顯示步數、CFG、種子。

@@ -16,7 +16,7 @@ const GType types[] = {GType::F32, GType::F16, GType::BF16, GType::F8_E4M3, GTyp
 bool same(float a, float b) {
   return (std::isnan(a) && std::isnan(b)) || std::memcmp(&a, &b, sizeof(float)) == 0;
 }
-std::vector<uint8_t> random_data(GType t, int64_t n) {
+std::vector<uint8_t> make_random_data(GType t, int64_t n) {
   std::mt19937 rng(100 + unsigned(t));
   const auto bytes = gtype_block_bytes(t), block = size_t(gtype_block(t));
   std::vector<uint8_t> data(n / block * bytes);
@@ -129,7 +129,7 @@ void invalid_inputs() {
 
 void benchmark(GType t, int dev) {
   constexpr int64_t n = int64_t(5376) * 28672;
-  const auto seed = random_data(t, gtype_block(t));
+  const auto seed = make_random_data(t, gtype_block(t));
   std::vector<uint8_t> raw(gtype_row_bytes(t, n));
   for (size_t i = 0; i < raw.size(); i += seed.size()) std::memcpy(raw.data() + i, seed.data(), seed.size());
   DevBuf src(raw.size(), dev), dst(n * 2, dev);
@@ -173,7 +173,9 @@ void q8_roundtrip(int dev) {
     for (int k = 0; k < 32; ++k) amax = std::max(amax, std::fabs(__bfloat162float(host[b * 32 + k])));
     for (int k = 0; k < 32; ++k)
       MX_CHECK(std::fabs(back[b * 32 + k] - __bfloat162float(host[b * 32 + k])) <= amax / 127.f * 0.51f + amax * 1e-3f,
-               "Q8_0 roundtrip error too large at %lld", (long long)(b * 32 + k));
+               "Q8_0 roundtrip error too large at %lld (source %.7g, output %.7g, amax %.7g, scale bytes %02x%02x, q %d)",
+               (long long)(b * 32 + k), __bfloat162float(host[b * 32 + k]), back[b * 32 + k], amax,
+               raw[b * 34 + 1], raw[b * 34], int8_t(raw[b * 34 + 2 + k]));
   }
   std::printf("GPU%d Q8_0 quantize roundtrip PASS\n", dev);
 }
@@ -192,7 +194,7 @@ int main() {
       q8_roundtrip(dev);
       for (auto t : types) {
         const auto n = gtype_block(t) == 1 ? 8193 : gtype_block(t) * 33;
-        auto raw = random_data(t, n); std::vector<float> ref(n);
+        auto raw = make_random_data(t, n); std::vector<float> ref(n);
         dequant_cpu(raw.data(), t, n, ref.data());
         compare_gpu(t, raw, ref, dev); compare_gpu(t, raw, ref, dev, true);
       }
