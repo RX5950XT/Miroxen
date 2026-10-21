@@ -4,25 +4,35 @@
 #include <charconv>
 #include <fstream>
 #include <mutex>
-#ifndef _WIN32
-#include <cctype>
-#include <cstdio>
-#include <sstream>
-#include <string>
-#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#else
+#include <dlfcn.h>
+#include <unistd.h>
+#include <sstream>
+#include <string>
 #endif
 
 namespace mx {
 using json = nlohmann::json;
 namespace {
 #ifdef _WIN32
+using Lib = HMODULE;
+Lib open_nvml() { return LoadLibraryExW(L"nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32); }
+void* sym(Lib lib, const char* name) { return reinterpret_cast<void*>(GetProcAddress(lib, name)); }
+void close_nvml(Lib lib) { FreeLibrary(lib); }
+#else
+using Lib = void*;
+Lib open_nvml() { return dlopen("libnvidia-ml.so.1", RTLD_NOW | RTLD_LOCAL); }
+void* sym(Lib lib, const char* name) { return dlsym(lib, name); }
+void close_nvml(Lib lib) { dlclose(lib); }
+#endif
+// 驅動附帶的 NVML 動態載入，不啟動外部程式；沒有驅動時 GPU 讀數維持 null。
 struct Nvml {
   using Device = void*;
   struct Utilization { unsigned gpu, memory; };
-  HMODULE dll = LoadLibraryExW(L"nvml.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  Lib dll = open_nvml();
   int (*init)() = nullptr;
   int (*handle)(const char*, Device*) = nullptr;
   int (*utilization)(Device, Utilization*) = nullptr;
@@ -31,21 +41,22 @@ struct Nvml {
   bool ready = false;
   Nvml() {
     if (!dll) return;
-    init = reinterpret_cast<decltype(init)>(GetProcAddress(dll, "nvmlInit_v2"));
-    handle = reinterpret_cast<decltype(handle)>(GetProcAddress(dll, "nvmlDeviceGetHandleByPciBusId_v2"));
-    utilization = reinterpret_cast<decltype(utilization)>(GetProcAddress(dll, "nvmlDeviceGetUtilizationRates"));
-    temperature = reinterpret_cast<decltype(temperature)>(GetProcAddress(dll, "nvmlDeviceGetTemperature"));
-    power = reinterpret_cast<decltype(power)>(GetProcAddress(dll, "nvmlDeviceGetPowerUsage"));
+    init = reinterpret_cast<decltype(init)>(sym(dll, "nvmlInit_v2"));
+    handle = reinterpret_cast<decltype(handle)>(sym(dll, "nvmlDeviceGetHandleByPciBusId_v2"));
+    utilization = reinterpret_cast<decltype(utilization)>(sym(dll, "nvmlDeviceGetUtilizationRates"));
+    temperature = reinterpret_cast<decltype(temperature)>(sym(dll, "nvmlDeviceGetTemperature"));
+    power = reinterpret_cast<decltype(power)>(sym(dll, "nvmlDeviceGetPowerUsage"));
     ready = init && handle && init() == 0;
   }
   ~Nvml() {
     if (ready) {
-      auto shutdown = reinterpret_cast<int(*)()>(GetProcAddress(dll, "nvmlShutdown"));
+      auto shutdown = reinterpret_cast<int(*)()>(sym(dll, "nvmlShutdown"));
       if (shutdown) shutdown();
     }
-    if (dll) FreeLibrary(dll);
+    if (dll) close_nvml(dll);
   }
 };
+#ifdef _WIN32
 uint64_t ticks(FILETIME f) { return (uint64_t(f.dwHighDateTime) << 32) | f.dwLowDateTime; }
 #else
 bool read_cpu(uint64_t& total, uint64_t& idle) {
@@ -79,38 +90,6 @@ bool read_process(uint64_t& cpu, uint64_t& bytes) {
   bytes = rss * uint64_t(sysconf(_SC_PAGESIZE));
   return true;
 }
-
-std::vector<std::array<std::string, 4>> nvidia_metrics() {
-  std::vector<std::array<std::string, 4>> rows;
-  FILE* f = popen("nvidia-smi --query-gpu=pci.bus_id,utilization.gpu,temperature.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null", "r");
-  if (!f) return rows;
-  char line[512];
-  while (std::fgets(line, sizeof(line), f)) {
-    std::istringstream s(line);
-    std::array<std::string, 4> row;
-    if (std::getline(s, row[0], ',') && std::getline(s, row[1], ',') &&
-        std::getline(s, row[2], ',') && std::getline(s, row[3])) {
-      for (auto& cell : row) {
-        const auto first = cell.find_first_not_of(" \t\r\n");
-        const auto last = cell.find_last_not_of(" \t\r\n");
-        cell = first == std::string::npos ? "" : cell.substr(first, last - first + 1);
-      }
-      rows.push_back(std::move(row));
-    }
-  }
-  pclose(f);
-  return rows;
-}
-
-std::string normalize_bus(std::string bus) {
-  const auto colon = bus.find(':');
-  if (colon != std::string::npos) {
-    const auto first = bus.find_first_not_of('0');
-    bus = (first == std::string::npos || first > colon ? "0" : bus.substr(first, colon - first)) + bus.substr(colon);
-  }
-  std::transform(bus.begin(), bus.end(), bus.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-  return bus;
-}
 #endif
 }  // namespace
 
@@ -122,7 +101,6 @@ std::string system_json(const std::vector<GpuInfo>& gpus, int queue_length, uint
   // Windows 計數器與 NVML 都不啟動外部程式；首筆 CPU 還沒有採樣間隔，回 null。
   static std::mutex mu;
   std::lock_guard lk(mu);
-  static Nvml nvml;
   static uint64_t prev_idle = 0, prev_total = 0, prev_process = 0;
   static json cpu = nullptr, process_cpu = nullptr;
   FILETIME idle{}, kernel{}, user{}, creation{}, exit{}, pk{}, pu{};
@@ -175,12 +153,11 @@ std::string system_json(const std::vector<GpuInfo>& gpus, int queue_length, uint
     host["ram_total"] = total_kb * 1024;
     host["ram_used"] = (total_kb - std::min(total_kb, available_kb)) * 1024;
   }
-  const auto metrics = nvidia_metrics();
 #endif
+  static Nvml nvml;
   for (const auto& g : gpus) {
     json gpu = {{"index", g.index}, {"name", g.name}, {"total", g.total}, {"free", g.free},
                 {"utilization_percent", nullptr}, {"temperature_c", nullptr}, {"power_w", nullptr}};
-#ifdef _WIN32
     Nvml::Device device{};
     if (nvml.ready && !g.pci_bus.empty() && nvml.handle(g.pci_bus.c_str(), &device) == 0) {
       Nvml::Utilization u{};
@@ -189,16 +166,6 @@ std::string system_json(const std::vector<GpuInfo>& gpus, int queue_length, uint
       if (nvml.temperature && nvml.temperature(device, 0, &value) == 0) gpu["temperature_c"] = value;
       if (nvml.power && nvml.power(device, &value) == 0) gpu["power_w"] = value / 1000.0;
     }
-#else
-    for (const auto& row : metrics) if (normalize_bus(row[0]) == normalize_bus(g.pci_bus)) {
-      try {
-        if (row[1] != "[N/A]" && !row[1].empty()) gpu["utilization_percent"] = std::stoi(row[1]);
-        if (row[2] != "[N/A]" && !row[2].empty()) gpu["temperature_c"] = std::stoi(row[2]);
-        if (row[3] != "[N/A]" && !row[3].empty()) gpu["power_w"] = std::stod(row[3]);
-      } catch (...) {}  // Telemetry is optional; leave unreadable values null.
-      break;
-    }
-#endif
     arr.push_back(std::move(gpu));
   }
   return json{{"gpus", arr}, {"queue_length", queue_length}, {"host", host}, {"process", process},
