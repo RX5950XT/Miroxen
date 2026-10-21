@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <filesystem>
 #include <mutex>
+#ifndef _WIN32
+#include <array>
+#include <unistd.h>
+#endif
 
 #include "core/common.h"
 #include "models/minimax_h3/pipeline.h"
@@ -249,6 +253,21 @@ int cmd_serve(const std::map<std::string, std::string>& kv, const EngineConfig& 
   opt.port = std::atoi(get("--port", std::to_string(opt.port)).c_str());
   opt.api_key = get("--api-key", "");
   opt.web_dir = get("--web", opt.web_dir);
+#ifndef _WIN32
+  if (!kv.count("--web") && !fs::exists(fs::path(opt.web_dir) / "index.html")) {
+#ifdef MX_SOURCE_DIR
+    const auto source_web = fs::path(MX_SOURCE_DIR) / "web";
+    if (fs::exists(source_web / "index.html")) opt.web_dir = source_web.string();
+#endif
+    std::array<char, 4096> exe{};
+    const auto n = readlink("/proc/self/exe", exe.data(), exe.size() - 1);
+    if (n > 0) {
+      const auto dir = fs::path(std::string(exe.data(), size_t(n))).parent_path();
+      for (const auto& candidate : {dir / "web", dir.parent_path() / "web"})
+        if (fs::exists(candidate / "index.html")) { opt.web_dir = candidate.string(); break; }
+    }
+  }
+#endif
   opt.out_dir = get("--out", cfg.out_dir);
   opt.lora_dir = get("--loras", (fs::path(cfg.models_dir) / "loras").string());
   opt.max_body_mb = size_t(std::atoll(get("--max-body", std::to_string(opt.max_body_mb)).c_str()));

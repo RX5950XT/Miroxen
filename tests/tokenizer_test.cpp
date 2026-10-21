@@ -241,9 +241,8 @@ bool file_ok(const char* path) {
   return static_cast<bool>(in);
 }
 
-const char* kQwen =
-    "D:\\Workspace\\Personal_Project\\Miroxen\\models\\image\\qwen-image-2.1\\hf\\processor\\tokenizer.json";
-const char* kMini = "D:\\Workspace\\Personal_Project\\Miroxen\\models\\video\\minimax-h3\\hf\\tokenizer\\tokenizer.json";
+const char* kQwen = "models/image/qwen-image-2.1/hf/processor/tokenizer.json";
+const char* kMini = "models/video/minimax-h3/hf/tokenizer/tokenizer.json";
 const char* kVec = "tests/data/tokenizer_vectors.txt";
 
 }  // namespace
@@ -252,7 +251,10 @@ int main() {
   try {
     check_nfc();
     expect_throw("無效 NFC", [] { mx::unicode_nfc("\xff"); });
-    if (!file_ok(kQwen)) throw std::runtime_error(std::string("找不到 Qwen tokenizer：") + kQwen);
+    if (!file_ok(kQwen)) {
+      std::cout << "skip tokenizer model vectors: Qwen tokenizer.json 不存在\n";
+      return 77;
+    }
     auto vec = load_vectors(kVec);
     if (vec["qwen"].size() < 200) fail("qwen 向量少於 200");
     auto qwen = mx::Tokenizer::load(kQwen);
