@@ -25,10 +25,10 @@ struct H3Dit::SpPart {
 size_t H3Dit::act_bytes_sp(int64_t S, int64_t n, int64_t chunk) const {
   const size_t D = dim_, I = inner_, F = ffn_, C = chunk > 0 ? chunk : chunk_, Ih = I / 2;
   const bool low = compute_ != QMode::BF16;
-  size_t keep = size_t(n) * D * 4 + size_t(S) * Ih * 2 * (low ? 3 : 4) + size_t(4) * 18 * D * 4;
+  size_t keep = size_t(n) * D * 4 + size_t(S) * Ih * 2 * (attn8_ ? 3 : 4) + size_t(4) * 18 * D * 4;
   size_t qkv = C * (D + 3 * I + 3 * Ih) * 2, mlp = C * (I + Ih + D + 3 * F) * 2;
-  size_t extra = low ? std::max(std::max(qkv, mlp) + C * std::max(F, I) * 9 / 8, size_t(S + 128) * Ih * 3 + (size_t(4) << 20))
-                     : std::max(qkv, mlp);
+  const size_t ws8 = attn8_ ? size_t(S + 128) * Ih * 3 + (size_t(4) << 20) : 0;
+  size_t extra = std::max(std::max(qkv, mlp) + (low ? C * std::max(F, I) * 9 / 8 : 0), ws8);
   return keep + extra + (size_t(64) << 20);
 }
 
@@ -240,7 +240,7 @@ void H3Dit::forward_sp(H3Dit& a, Ctx& ca, H3Seq& sa, H3Dit& b, Ctx& cb, H3Seq& s
       p.vh = p.c->act.alloc_n<bf16>(cols);
       AttnParams ap;
       ap.Sq = ap.Skv = int(S), ap.Hq = ap.Hkv = p.H, ap.D = a.head_dim_;
-      const bool fp8 = p.d->compute_ != QMode::BF16 && flash_attn_fp8_ok(p.qh, p.kh, p.vh, p.qh, ap);
+      const bool fp8 = p.d->attn8_ && flash_attn_fp8_ok(p.qh, p.kh, p.vh, p.qh, ap);
       p.oh = fp8 ? p.qh : p.c->act.alloc_n<bf16>(cols);
     }
     for (int i = 0; i < int(a.blocks_.size()); i++) {

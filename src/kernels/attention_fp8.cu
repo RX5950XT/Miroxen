@@ -176,12 +176,20 @@ __device__ __forceinline__ void mma_fp8(float (&c)[4], const unsigned (&a)[4], u
       : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
       : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "r"(one), "h"(sel));
 #elif __CUDA_ARCH__ >= 890
+  // 此路徑的累加器實際精度不足 fp32（L4 實測 S=32560 誤差 0.11），呼叫端用 kSplitAcc 每個 tile 另外累加。
   asm volatile(
       "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
       : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
       : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 #endif
 }
+
+// P·V 是否每個 K/V tile 先累加到暫存再加回 fp32（兩段累加，同 SageAttention2）。sm_120a 區塊縮放版不需要。
+#if defined(__CUDA_ARCH_FEAT_SM120_ALL)
+constexpr bool kSplitAcc = false;
+#else
+constexpr bool kSplitAcc = true;
+#endif
 
 template <int D>
 // 每個 SM 至少 3 個小 CTA：sm_120a 的 D=128 可用 168 registers，免去迴圈內的 spill。
@@ -306,19 +314,30 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
     }
 
     // O += P·V（f 已是 448·p，用滿 e4m3 範圍）。
+    unsigned a[kK / 32][4];
 #pragma unroll
     for (int kc = 0; kc < kK / 32; ++kc) {
-      const unsigned a[4] = {pack_fp8x4(f[4 * kc][0], f[4 * kc][1], f[4 * kc + 1][0], f[4 * kc + 1][1]),
-                             pack_fp8x4(f[4 * kc][2], f[4 * kc][3], f[4 * kc + 1][2], f[4 * kc + 1][3]),
-                             pack_fp8x4(f[4 * kc + 2][0], f[4 * kc + 2][1], f[4 * kc + 3][0], f[4 * kc + 3][1]),
-                             pack_fp8x4(f[4 * kc + 2][2], f[4 * kc + 2][3], f[4 * kc + 3][2], f[4 * kc + 3][3])};
+      a[kc][0] = pack_fp8x4(f[4 * kc][0], f[4 * kc][1], f[4 * kc + 1][0], f[4 * kc + 1][1]);
+      a[kc][1] = pack_fp8x4(f[4 * kc][2], f[4 * kc][3], f[4 * kc + 1][2], f[4 * kc + 1][3]);
+      a[kc][2] = pack_fp8x4(f[4 * kc + 2][0], f[4 * kc + 2][1], f[4 * kc + 3][0], f[4 * kc + 3][1]);
+      a[kc][3] = pack_fp8x4(f[4 * kc + 2][2], f[4 * kc + 2][3], f[4 * kc + 3][2], f[4 * kc + 3][3]);
+    }
 #pragma unroll
-      for (int dn = 0; dn < D / 8; dn += 2) {
+    for (int dn = 0; dn < D / 8; dn += 2) {
+      float t0[4] = {}, t1[4] = {};
+      float(&c0)[4] = kSplitAcc ? t0 : acc[dn];
+      float(&c1)[4] = kSplitAcc ? t1 : acc[dn + 1];
+#pragma unroll
+      for (int kc = 0; kc < kK / 32; ++kc) {
         unsigned b[4];
         const int j = lane >> 3;
         ldsm_x4(b, vd + swz<kK>((dn + (j >> 1)) * 8 + (lane & 7), kc * 2 + (j & 1)));
-        mma_fp8(acc[dn], a, b[0], b[1]);
-        mma_fp8(acc[dn + 1], a, b[2], b[3]);
+        mma_fp8(c0, a[kc], b[0], b[1]);
+        mma_fp8(c1, a[kc], b[2], b[3]);
+      }
+      if (kSplitAcc) {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) acc[dn][j] += t0[j], acc[dn + 1][j] += t1[j];
       }
     }
   }
@@ -367,11 +386,9 @@ bool fp8_ok(const bf16* q, const bf16* k, const bf16* v, const bf16* o, const At
   if (p.causal || (p.D != 64 && p.D != 128) || p.Sq <= 0 || p.Skv <= 0 || p.Hkv <= 0 || p.Hq % p.Hkv) return false;
   if (p.q_stride % 8 || p.kv_stride % 8 || p.o_stride % 2 || !al(q) || !al(k) || !al(v) || !al(o)) return false;
   if (p.Hq > 65535 || pad_to(p.Sq, kQ) / kQ > 0x7fffffff) return false;
-  int dev = 0, major = 0, minor = 0;
+  int dev = 0;
   MX_CUDA(cudaGetDevice(&dev));
-  MX_CUDA(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
-  MX_CUDA(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
-  return major * 10 + minor >= 89;
+  return flash_attn_fp8_supported(dev);
 }
 
 AttnParams with_defaults(AttnParams p) {
@@ -386,6 +403,13 @@ AttnParams with_defaults(AttnParams p) {
 
 size_t flash_attn_fp8_workspace(const AttnParams& p) {
   return p.Sq > 0 && p.Skv > 0 && p.D > 0 ? layout(p).total : 0;
+}
+
+bool flash_attn_fp8_supported(int device) {
+  int major = 0, minor = 0;
+  MX_CUDA(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
+  MX_CUDA(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device));
+  return major * 10 + minor >= 89;
 }
 
 bool flash_attn_fp8_ok(const bf16* q, const bf16* k, const bf16* v, const bf16* o, const AttnParams& p) {

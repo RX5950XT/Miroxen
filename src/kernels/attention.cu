@@ -14,7 +14,8 @@ template <int M_, int W_, int K_>
 struct Tile {
   static constexpr int M = M_, keys = K_, threads = W_ * 32, queries = 16 * M_ * W_;
 };
-// K 固定 32：每列的累加順序與舊版相同。K=64 在 G4 再快約 4%，但 h3_dit_parity 的音訊誤差會超標。
+// K 固定 32：K=64 只在 G4 快約 4%（A100、L4 反而變慢），且 h3_dit_parity 音訊誤差超標。
+// 該音訊門檻落在 bf16 捨入雜訊內（改用 fp32 參考注意力也超標，0.085），超標不代表變不準。
 using WideTile = Tile<2, 4, 32>;  // 每 SM shared memory 夠放兩個 block 的卡（A100 實測最快）
 using DeepTile = Tile<2, 8, 32>;  // 每 SM 約 100KB 的卡（G4／RTX PRO 6000 實測最快）
 using SmallTile = Tile<1, 4, 32>;
@@ -76,6 +77,18 @@ __device__ __forceinline__ void copy_kv(bf16* ks, bf16* vs, const bf16* k, const
   asm volatile("cp.async.commit_group;" ::: "memory");
 }
 
+// 硬體 exp2（極小值直接歸零）；exp2f 沒開 fast-math 會多出次正規數處理，每個元素多 3 道指令。
+// 實測 A100 +3%、L4 +1%；G4（sm_120）反而慢 1%，所以 sm_120 以上維持 exp2f。
+__device__ __forceinline__ float ex2(float x) {
+#if __CUDA_ARCH__ >= 1200
+  return exp2f(x);
+#else
+  float y;
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+  return y;
+#endif
+}
+
 template <int kKeys, bool Causal>
 __device__ __forceinline__ void online_softmax(float (&score)[kKeys / 8][4], float (&maximum)[2],
     float (&sum)[2], float (&alpha)[2], int qrow, int lane, int64_t start, const AttnParams& p) {
@@ -104,16 +117,16 @@ __device__ __forceinline__ void online_softmax(float (&score)[kKeys / 8][4], flo
     tilemax[r] = fmaxf(tilemax[r], __shfl_xor_sync(0xffffffff, tilemax[r], 1));
     tilemax[r] = fmaxf(tilemax[r], __shfl_xor_sync(0xffffffff, tilemax[r], 2));
     float next = fmaxf(maximum[r], tilemax[r]);
-    alpha[r] = maximum[r] == -CUDART_INF_F ? 0.f : exp2f(maximum[r] - next);
+    alpha[r] = maximum[r] == -CUDART_INF_F ? 0.f : ex2(maximum[r] - next);
     maximum[r] = next;
-    // 整列仍全被遮罩時用 0 當基準，exp2f(-inf - 0) = 0，避免 -inf - -inf 變 NaN。
+    // 整列仍全被遮罩時用 0 當基準，ex2(-inf - 0) = 0，避免 -inf - -inf 變 NaN。
     base[r] = next == -CUDART_INF_F ? 0.f : next;
   }
   #pragma unroll
   for (int n = 0; n < kKeys / 8; ++n) {
     #pragma unroll
     for (int j = 0; j < 4; ++j) {
-      score[n][j] = exp2f(score[n][j] - base[j / 2]);
+      score[n][j] = ex2(score[n][j] - base[j / 2]);
       tilesum[j / 2] += score[n][j];
     }
   }

@@ -122,6 +122,7 @@ class H3Dit {
   int64_t dim_ = 0, ffn_ = 0, inner_ = 0;
   int heads_ = 56, head_dim_ = 128, rot_ = 96;
   QMode compute_ = QMode::BF16;
+  bool attn8_ = false;  // 注意力走 INT8/FP8：要求低精度且 sm_89 以上（線性層退回 bf16 時也照用，例如 L4）
   float eps_ = 1e-5f;
   int64_t chunk_ = kMaxChunk;
   Linear video_in_, audio_in_, cond_proj_, final_adaln_, video_out_, audio_out_;

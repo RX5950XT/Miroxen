@@ -79,6 +79,7 @@ class QwenImageDit {
 
   QwenImageDitConfig cfg_;
   QMode compute_ = QMode::BF16;
+  bool attn8_ = false;  // 注意力走 INT8/FP8：要求低精度且 sm_89 以上（線性層退回 bf16 時也照用，例如 L4）
   DeviceWeights dw_;
   Linear img_in_, txt_in1_, txt_in2_, t1_, t2_, modulation_, norm_out_, proj_out_;
   DevBuf txt_norm_w_;  // zero-centered → 已加 1

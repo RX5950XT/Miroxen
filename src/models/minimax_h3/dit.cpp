@@ -31,6 +31,7 @@ std::vector<float> h3_sigmas(int steps, float shift) {
 }
 
 H3Dit::H3Dit(const TensorStore& st, int device, int max_layers, QMode compute) : dw_(st, device) {
+  attn8_ = compute != QMode::BF16 && flash_attn_fp8_supported(device);
   if (!qmode_supported(compute, device)) {
     MX_INFO("GPU%d 不支援 %s 運算，DiT 改用 bf16", device, qmode_name(compute));
     compute = QMode::BF16;
@@ -112,9 +113,10 @@ size_t H3Dit::act_bytes(int64_t S, int64_t chunk) const {
   size_t scratch = C * (D + std::max(3 * I, 3 * F)) * 2;
   size_t mods = size_t(4) * 18 * D * 4;
   // bf16：另配 o。低精度：線性層輸入量化暫存（chunk 內）與 FP8 注意力工作區（約 3·S·inner bytes）不同時使用。
-  size_t extra = compute_ == QMode::BF16
-                     ? size_t(S) * I * 2 + scratch
-                     : std::max(scratch + C * std::max(F, I) * 9 / 8, size_t(S + 128) * I * 3 + (size_t(4) << 20));
+  const size_t ws8 = size_t(S + 128) * I * 3 + (size_t(4) << 20);
+  size_t extra = compute_ != QMode::BF16 ? std::max(scratch + C * std::max(F, I) * 9 / 8, ws8)
+                 : attn8_                ? std::max(scratch, ws8)
+                                         : size_t(S) * I * 2 + scratch;
   return per_row * S + extra + mods + (size_t(64) << 20);
 }
 
@@ -215,7 +217,7 @@ void H3Dit::attn_mlp(Ctx& c, const Block& b, float* x, int64_t S, const float* c
   ap.Hq = ap.Hkv = heads_;
   ap.D = head_dim_;
   // 低精度模式下注意力也用 INT8/FP8 tensor core；該路徑先量化 q/k/v 進工作區，輸出直接覆寫 q。
-  const bool fp8 = compute_ != QMode::BF16 && flash_attn_fp8_ok(q, k, v, q, ap);
+  const bool fp8 = attn8_ && flash_attn_fp8_ok(q, k, v, q, ap);
   bf16* o = fp8 ? q : c.act.alloc_n<bf16>(S * I);
   if (fp8) {
     ArenaScope s3(c.act);
