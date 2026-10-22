@@ -1,0 +1,15 @@
+# repo	revision	repo_path	dest（相對 models/）	bytes	group
+abenzerps/Qwen-Image-2.1-Uncensored-GGUF	6b34e59458d3eb7ba6a6f86a116aed5253dc02c3	qwen-image-2.1-UC-Q8_0.gguf	image/qwen-image-2.1/qwen-image-2.1-UC-Q8_0.gguf	7591557920	image
+AtomicChat/Qwen-Image-2.1-Turbo-GGUF	main	Qwen-Image-2.1-Turbo-Q8_0.gguf	image/qwen-image-2.1/Qwen-Image-2.1-Turbo-Q8_0.gguf	7591554784	image
+AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF	df96693dbdfb8738c0bf1bbd0337d149808db948	Qwen-Image-2.1-Turbo-Uncensored-AD-Q4_K.gguf	image/qwen-image-2.1/Qwen-Image-2.1-Turbo-Abliterated-Uncensored-AD-Q4_K.gguf	5287517120	image
+Qwen/Qwen3-VL-8B-Instruct-GGUF	main	mmproj-Qwen3VL-8B-Instruct-F16.gguf	image/qwen-image-2.1/mmproj-Qwen3VL-8B-Instruct-F16.gguf	1159029824	image
+madebyollin/texture-fix-vae-for-qwen-image-2.1	1f80456b6de9d89043c133ff1f3875449b8bd016	texture_fix_vae_for_qwen_image_2.1_bf16.safetensors	image/qwen-image-2.1/vae/texture_fix_vae_for_qwen_image_2.1_bf16.safetensors	675509688	image
+wesjos/Qwen-Image2.1-Genshin-2D-Lora	main	genshintcg_style_st4000.safetensors	loras/image/genshintcg_style_st4000.safetensors	159436048	image
+unsloth/MiniMax-H3-GGUF	main	minimax_h3_fl2va_pruned-Q4_K.gguf	video/minimax-h3/minimax_h3_fl2va_pruned-Q4_K.gguf	11420663904	video
+unsloth/MiniMax-H3-GGUF	main	minimax_h3_ref2va_pruned-Q4_K.gguf	video/minimax-h3/minimax_h3_ref2va_pruned-Q4_K.gguf	11381096544	video
+unsloth/MiniMax-H3-GGUF	d629413c2e5b51b38c453668b75ca3b06ca92703	vae/minimax_h3_video_vae_fp16.safetensors	video/minimax-h3/vae/minimax_h3_video_vae_fp16.safetensors	5207808496	video
+unsloth/MiniMax-H3-GGUF	d629413c2e5b51b38c453668b75ca3b06ca92703	vae/minimax_h3_audio_vae_fp32.safetensors	video/minimax-h3/vae/minimax_h3_audio_vae_fp32.safetensors	605254808	video
+pottokao/MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-GGUF	main	MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-Q3_K_S_vis.gguf	video/minimax-h3/MiniMax-H3-TextEncoder-Qwen3VL-32B-abliterated-Q3_K_S_vis.gguf	12646554528	video
+lightx2v/Minimax-h3-Turbo	main	minimax_h3_fl2v_turbo_4step_v1.2_768p_bf16.safetensors	loras/video/minimax_h3_fl2v_turbo_4step_v1.2_768p_bf16.safetensors	1383677808	video
+lightx2v/Minimax-h3-Turbo	main	minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors	loras/video/minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors	1383677808	video
+lightx2v/Minimax-h3-Turbo	main	minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors	loras/video/minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors	1383677808	video

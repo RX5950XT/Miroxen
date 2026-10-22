@@ -1,0 +1,87 @@
+{
+ "gpus": [
+  {
+   "free": 23455727616,
+   "index": 0,
+   "name": "NVIDIA L4",
+   "power_w": 21.17,
+   "temperature_c": 35,
+   "total": 23659151360,
+   "utilization_percent": 0
+  }
+ ],
+ "cases": [
+  {
+   "case": "影片 完整 30 步 864×480 56 幀",
+   "seed": 42,
+   "seconds": 227.73,
+   "wall": 230.43,
+   "denoise": 215.12,
+   "steps": 29,
+   "sec_per_step": 7.418,
+   "url": "/files/job_00000002.mp4",
+   "timings": {
+    "audio_decode_wav": 0.496109434,
+    "denoise": 215.124246565,
+    "dit_prepare": 0.043096624,
+    "ffmpeg_finish": 0.453640231,
+    "ffmpeg_pipe": 0.13656251600000002,
+    "input_encode": 8.311099999999997e-05,
+    "latent_readback": 0.080598614,
+    "model_lora": 1.45e-05,
+    "text_encode": 0.000543256,
+    "video_prepare": 0.000244892,
+    "video_vae_decode": 11.392052135
+   },
+   "median_seconds": 227.78
+  },
+  {
+   "case": "影片 8 步 LoRA 864×480 56 幀",
+   "seed": 42,
+   "seconds": 76.44,
+   "wall": 75.31,
+   "denoise": 63.76,
+   "steps": 8,
+   "sec_per_step": 7.971,
+   "url": "/files/job_00000005.mp4",
+   "timings": {
+    "audio_decode_wav": 0.481711695,
+    "denoise": 63.764855847,
+    "dit_prepare": 0.044454126,
+    "ffmpeg_finish": 0.557747024,
+    "ffmpeg_pipe": 0.13967367500000002,
+    "input_encode": 7.251299999999996e-05,
+    "latent_readback": 0.069954177,
+    "model_lora": 1.687e-06,
+    "text_encode": 0.000588002,
+    "video_prepare": 0.000222954,
+    "video_vae_decode": 11.379594951000001
+   },
+   "median_seconds": 76.47
+  },
+  {
+   "case": "影片 4 步 LoRA 864×480 56 幀",
+   "seed": 42,
+   "seconds": 44.41,
+   "wall": 44.5,
+   "denoise": 31.82,
+   "steps": 4,
+   "sec_per_step": 7.956,
+   "url": "/files/job_00000008.mp4",
+   "timings": {
+    "audio_decode_wav": 0.482485992,
+    "denoise": 31.822191699,
+    "dit_prepare": 0.043577582,
+    "ffmpeg_finish": 0.483728633,
+    "ffmpeg_pipe": 0.146042023,
+    "input_encode": 0.00013692099999999992,
+    "latent_readback": 0.069957853,
+    "model_lora": 1.6494e-05,
+    "text_encode": 0.000550709,
+    "video_prepare": 0.000277451,
+    "video_vae_decode": 11.359527563
+   },
+   "median_seconds": 44.51
+  }
+ ]
+}

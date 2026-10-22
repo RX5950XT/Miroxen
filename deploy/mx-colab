@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Miroxen on Colab 控制腳本（在 WSL Ubuntu 執行）。
+#   mx-colab login              一次性：Colab CLI 登入、rclone 連 Google Drive、產生 API 金鑰
+#   mx-colab bundle [build目錄]  打包 Linux 版 miroxen（含 CUDA 函式庫、web、tokenizer 設定）上傳 Drive
+#   mx-colab up [--gpu G4] [--groups "image video"] [--private] [--compute fp8]
+#   mx-colab tunnel             重開本機 127.0.0.1:8188 → VM 的 SSH 轉發
+#   mx-colab status | logs | ssh | down | usage（剩餘點數＋開關機紀錄）
+#   mx-colab bench [bench.py 參數]
+#   mx-colab probe [G4 H100 A100 L4 T4]   逐一試開 GPU 看帳號有哪些權限（開成功立刻關）
+# 同時開多台：MX_SESSION=mxa MX_PORT=8189 MX_SEED=0 mx-colab up --gpu A100（MX_SEED=0 不補傳 Drive，避免兩台同時傳出重複檔）
+set -euo pipefail
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+CONF=${MX_CONF:-$HOME/.config/miroxen-colab}
+SESSION=${MX_SESSION:-mx}
+REMOTE=${MX_REMOTE:-gdrive:Miroxen}
+REPO=${MX_REPO:-$HERE/..}
+LOCAL_MODELS=${MX_LOCAL_MODELS:-$REPO/models}
+HOST=colab-$SESSION
+PORT=${MX_PORT:-8188}
+EP=$CONF/endpoint-$SESSION
+export PATH=$HOME/.local/bin:$PATH
+mkdir -p "$CONF" && chmod 700 "$CONF"
+SSHO=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ServerAliveInterval=30
+      -o ControlPath="$CONF/cm-$SESSION" -o ProxyCommand="colab ${COLAB_AUTH:-} ssh --proxy-mode -s $SESSION")
+# colab ssh 找不到 session 會自動開新 VM（會花額度），所以先確認 session 還在。
+alive() { colab ${COLAB_AUTH:-} sessions < /dev/null 2>/dev/null | grep -q "^\[$SESSION\]"; }
+# Colab 每台 VM 同時只准一條 colab ssh（多的回 HTTP 429，剛開機時也會）→ 開一條常駐主連線（兼本機 8188 轉發），其他指令共用它。
+master() {
+  ssh "${SSHO[@]}" -O check "root@$HOST" 2>/dev/null && return
+  for _ in 1 2 3 4 5 6 7 8; do
+    # 背景常駐的連線不能占著呼叫端的 stdout/stderr，否則 `mx-colab ... | tail` 永遠等不到結束
+    ssh "${SSHO[@]}" -f -N -o ControlMaster=yes -o ExitOnForwardFailure=yes -L "$PORT:127.0.0.1:8188" "root@$HOST" \
+      < /dev/null > "$CONF/ssh.log" 2>&1 && return
+    sleep 15
+  done
+  tail -3 "$CONF/ssh.log" >&2
+  die "連不上 VM 的 SSH"
+}
+VM_OK=0
+vm() {
+  [[ $VM_OK == 1 ]] || { alive || die "session $SESSION 不存在（VM 可能已被回收），先跑 mx-colab up"; master; VM_OK=1; }
+  ssh "${SSHO[@]}" "root@$HOST" "$@"
+}
+die() { echo "錯誤：$*" >&2; exit 1; }
+# Google 不提供每次使用的紀錄 → 開關機時把剩餘點數記到 Drive 的 usage.csv
+# shortcut: 多台同時開關機可能互相覆蓋一行，真的常並行再改成每台各寫一檔
+record() {
+  local bal; bal=$(colab ${COLAB_AUTH:-} usage < /dev/null 2>/dev/null | awk '/balance/ {print $3}')
+  rclone copyto "$REMOTE/usage.csv" "$CONF/usage.csv" -q 2>/dev/null || echo "時間,事件,session,GPU,剩餘點數" > "$CONF/usage.csv"
+  echo "$(TZ=Asia/Taipei date '+%F %T'),$1,$SESSION,${2:-},${bal:-?}" >> "$CONF/usage.csv"
+  rclone copyto "$CONF/usage.csv" "$REMOTE/usage.csv" -q || echo "警告：usage.csv 沒寫進 Drive" >&2
+}
+key() { [[ -s $CONF/api_key ]] || die "還沒有 API 金鑰，先跑 mx-colab login"; cat "$CONF/api_key"; }
+
+cmd_login() {
+  colab ${COLAB_AUTH:-} usage
+  if ! rclone listremotes 2>/dev/null | grep -q '^gdrive:$'; then
+    echo "接下來 rclone 會給一個網址，用訂閱 Google AI Pro 的帳號在瀏覽器同意即可。"
+    rclone config create gdrive drive scope=drive
+  fi
+  rclone mkdir "$REMOTE/outputs" && rclone about gdrive: | head -3
+  [[ -s $CONF/api_key ]] || { openssl rand -hex 24 > "$CONF/api_key"; chmod 600 "$CONF/api_key"; }
+  echo "API 金鑰存在 $CONF/api_key"
+}
+
+cmd_bundle() {
+  local build=${1:-$HOME/mx-build13} st tgz=$CONF/miroxen-linux.tar.gz; st=$(mktemp -d)
+  [[ -x $build/miroxen ]] || die "找不到 $build/miroxen，先在 repo 根目錄跑 CUDACXX=/usr/local/cuda-13.3/bin/nvcc ./build.sh $build"
+  mkdir -p "$st/lib"
+  cp "$build/miroxen" "$st/" && cp -r "$REPO/web" "$st/"
+  # 只帶 CUDA 函式庫，系統函式庫用 VM 自己的（同為 Ubuntu 24.04）
+  ldd "$build/miroxen" | awk '/libcu(dart|blas|blasLt)\.so/ {print $3}' | xargs -I{} cp -L {} "$st/lib/"
+  # 小型 tokenizer／config（大權重另走 models.tsv）
+  (cd "$LOCAL_MODELS" && find . -path '*/hf/*' -type f -size -50M -not -path '*/.cache/*' -print0 |
+    tar --null -cf - -T -) | (mkdir -p "$st/models" && tar -xf - -C "$st/models")
+  tar -czf "$tgz" -C "$st" . && rm -rf "$st"
+  echo "程式包 $tgz（$(du -h "$tgz" | cut -f1)）"
+  rclone listremotes 2>/dev/null | grep -q '^gdrive:$' || die "還沒連 Drive（mx-colab login），程式包先留在本機"
+  rclone copyto "$tgz" "$REMOTE/bin/miroxen-linux.tar.gz" --drive-chunk-size 128M -P
+}
+
+cmd_up() {
+  local gpu=G4 groups="image video" public=1 compute=fp8 extra=()
+  while [[ $# -gt 0 ]]; do case $1 in
+    --gpu) gpu=$2; shift 2;; --groups) groups=$2; shift 2;; --private) public=0; shift;;
+    --compute) compute=$2; shift 2;; --high-mem) extra+=(--high-mem); shift;; *) die "不認得參數 $1";; esac; done
+  rclone lsf "$REMOTE/bin/miroxen-linux.tar.gz" >/dev/null 2>&1 || die "Drive 上沒有程式包，先跑 mx-colab bundle"
+  local t0=$SECONDS
+  if ! alive; then
+    echo "== 開 $gpu VM（session $SESSION）"
+    colab ${COLAB_AUTH:-} new -s "$SESSION" --gpu "$gpu" "${extra[@]}" < /dev/null
+  fi
+  echo "== 上傳設定"
+  vm 'mkdir -p /content/mx /root/.config/rclone && rm -f /content/.mx_ready'
+  vm 'cat > /root/.config/rclone/rclone.conf && chmod 600 /root/.config/rclone/rclone.conf' < "$(rclone config file | tail -1)"
+  vm 'umask 077; cat > /content/mx/api_key' <<< "$(key)"
+  vm 'umask 077; cat > /content/mx/hf_token' <<< "${HF_TOKEN:-}"
+  for f in models.tsv vm/setup.sh vm/serve.py vm/keepalive.sh; do vm "cat > /content/mx/$(basename $f)" < "$HERE/$f"; done
+  # VM 上的 keepalive 要用 colab CLI 連回自己的 kernel，所以帶上本機的 Colab 憑證與 session 資訊
+  vm 'mkdir -p /root/.config/colab-cli && chmod 700 /root/.config/colab-cli'
+  for f in token.json sessions.json; do
+    [[ -f ~/.config/colab-cli/$f ]] && vm "umask 077; cat > /root/.config/colab-cli/$f" < ~/.config/colab-cli/$f
+  done
+  [[ -n ${GOOGLE_APPLICATION_CREDENTIALS:-} ]] && vm 'umask 077; cat > /content/mx/adc.json' < "$GOOGLE_APPLICATION_CREDENTIALS"
+  echo "== VM 安裝與載入模型"
+  vm "MX_REMOTE='$REMOTE' MX_GROUPS='$groups' MX_PUBLIC=$public MX_SESSION='$SESSION' MX_COLAB_AUTH='${COLAB_AUTH:-}' MX_COMPUTE=$compute MX_SEED=${MX_SEED:-1} bash /content/mx/setup.sh" || die "VM 上的 setup.sh 失敗（見上方訊息）"
+  vm 'cat /content/endpoint.txt 2>/dev/null' > "$EP" || true
+  cmd_tunnel
+  echo "== 上線，耗時 $((SECONDS - t0)) 秒"
+  record 開機 "$gpu"
+  cmd_status
+}
+
+cmd_tunnel() {
+  alive || die "session $SESSION 不存在"
+  master  # 主連線本身就帶著 8188 轉發；還活著就沿用（先 -O exit 再檢查會撞到它還沒關完）
+  echo "本機轉發：http://127.0.0.1:$PORT（Windows 瀏覽器也能開）"
+}
+
+cmd_status() {
+  colab ${COLAB_AUTH:-} sessions < /dev/null 2>&1 | grep -E "^\[$SESSION\]|No active" || true
+  local pub; pub=$(cat "$EP" 2>/dev/null || true)
+  echo "公開網址：${pub:-（無）}"
+  echo "API 金鑰：$CONF/api_key"
+  curl -s -m 10 -H "Authorization: Bearer $(key)" "http://127.0.0.1:$PORT/v1/system" 2>/dev/null |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); [print("GPU%d %s 空閒 %.1f/%.1f GiB" % (g["index"], g["name"], g["free"]/2**30, g["total"]/2**30)) for g in d["gpus"]]; print("佇列", d["queue_length"])' 2>/dev/null ||
+    echo "本機轉發沒有回應（跑 mx-colab tunnel）"
+}
+
+cmd_down() {
+  vm "rclone --config /root/.config/rclone/rclone.conf copy /content/out $REMOTE/outputs/\$(cat /content/mx/run_id) --exclude 'tmp/**' -q; pgrep -f '^[r]clone .* copy /content/miroxen/models' >/dev/null && echo '注意：模型仍在補傳 Drive，關機會中斷（下次 up 會續傳）'" || true
+  ssh "${SSHO[@]}" -O exit "root@$HOST" 2>/dev/null || true
+  colab ${COLAB_AUTH:-} stop -s "$SESSION" < /dev/null
+  rm -f "$EP"
+  record 關機
+}
+
+case ${1:-} in
+  login) cmd_login;;
+  bundle) shift; cmd_bundle "$@";;
+  up) shift; cmd_up "$@";;
+  tunnel) cmd_tunnel;;
+  status) cmd_status;;
+  logs) vm 'tail -n 40 /content/server.log; echo ---; tail -n 3 /content/seed.log 2>/dev/null' ;;
+  ssh) shift; vm "$@";;
+  down) cmd_down;;
+  usage) colab ${COLAB_AUTH:-} usage < /dev/null; echo; rclone cat "$REMOTE/usage.csv" 2>/dev/null | tail -n 20 | column -ts, || echo "還沒有紀錄";;
+  probe) shift; bash "$HERE/tools/probe_gpus.sh" "$@";;
+  bench-long) shift; python3 "$HERE/bench/bench_long.py" --key-file "$CONF/api_key" --url "http://127.0.0.1:$PORT" "$@";;
+  bench) shift; python3 "$HERE/bench/bench.py" --key-file "$CONF/api_key" --url "http://127.0.0.1:$PORT" "$@";;
+  *) sed -n '2,10p' "$0"; exit 1;;
+esac

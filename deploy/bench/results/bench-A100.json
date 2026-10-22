@@ -1,0 +1,140 @@
+{
+ "gpus": [
+  {
+   "free": 41957130240,
+   "index": 0,
+   "name": "NVIDIA A100-SXM4-40GB",
+   "power_w": 59.18,
+   "temperature_c": 33,
+   "total": 42405855232,
+   "utilization_percent": 0
+  }
+ ],
+ "cases": [
+  {
+   "case": "圖片 標準 40 步 1024²",
+   "seed": 42,
+   "seconds": 14.99,
+   "wall": 17.28,
+   "denoise": 14.47,
+   "steps": 40,
+   "sec_per_step": 0.362,
+   "url": "/files/job_00000002.png",
+   "timings": {
+    "denoise": 14.467358762,
+    "dit_prepare": 0.011314345,
+    "input": 1.983e-06,
+    "latent_layout_transfer": 9.0195e-05,
+    "lora": 8.8e-07,
+    "png_encode": 0.33458361,
+    "text_vision_encode": 0.000572476,
+    "vae_decode": 0.17233624,
+    "vae_encode": 1.224e-06
+   },
+   "median_seconds": 15.0
+  },
+  {
+   "case": "圖片 Turbo 8 步 1024²",
+   "seed": 42,
+   "seconds": 3.41,
+   "wall": 3.63,
+   "denoise": 2.9,
+   "steps": 8,
+   "sec_per_step": 0.362,
+   "url": "/files/job_00000005.png",
+   "timings": {
+    "denoise": 2.895727306,
+    "dit_prepare": 0.01110153,
+    "input": 1.69e-06,
+    "latent_layout_transfer": 9.3691e-05,
+    "lora": 1.162e-06,
+    "png_encode": 0.326656864,
+    "text_vision_encode": 0.000519623,
+    "vae_decode": 0.17175569,
+    "vae_encode": 1.271e-06
+   },
+   "median_seconds": 3.41
+  },
+  {
+   "case": "影片 完整 30 步 864×480 56 幀",
+   "seed": 42,
+   "seconds": 61.53,
+   "wall": 62.25,
+   "denoise": 56.61,
+   "steps": 29,
+   "sec_per_step": 1.952,
+   "url": "/files/job_00000008.mp4",
+   "timings": {
+    "audio_decode_wav": 0.188028397,
+    "denoise": 56.608122867,
+    "dit_prepare": 0.03311346,
+    "ffmpeg_finish": 0.455426242,
+    "ffmpeg_pipe": 0.129181015,
+    "input_encode": 7.793300000000008e-05,
+    "latent_readback": 0.009431659,
+    "model_lora": 3.654e-06,
+    "text_encode": 0.00051558,
+    "video_prepare": 0.000296222,
+    "video_vae_decode": 4.100686677
+   },
+   "median_seconds": 61.59
+  },
+  {
+   "case": "影片 8 步 LoRA 864×480 56 幀",
+   "seed": 42,
+   "seconds": 21.47,
+   "wall": 20.91,
+   "denoise": 16.53,
+   "steps": 8,
+   "sec_per_step": 2.067,
+   "url": "/files/job_0000000b.mp4",
+   "timings": {
+    "audio_decode_wav": 0.187796174,
+    "denoise": 16.534507888,
+    "dit_prepare": 0.033139011,
+    "ffmpeg_finish": 0.52478433,
+    "ffmpeg_pipe": 0.13270289700000001,
+    "input_encode": 4.380899999999996e-05,
+    "latent_readback": 0.009429786,
+    "model_lora": 1.8e-06,
+    "text_encode": 0.000401095,
+    "video_prepare": 0.000267285,
+    "video_vae_decode": 4.050498889
+   },
+   "median_seconds": 21.47
+  },
+  {
+   "case": "影片 4 步 LoRA 864×480 56 幀",
+   "seed": 42,
+   "seconds": 13.2,
+   "wall": 12.56,
+   "denoise": 8.26,
+   "steps": 4,
+   "sec_per_step": 2.066,
+   "url": "/files/job_0000000e.mp4",
+   "timings": {
+    "audio_decode_wav": 0.190224367,
+    "denoise": 8.263647971,
+    "dit_prepare": 0.033839375,
+    "ffmpeg_finish": 0.504286803,
+    "ffmpeg_pipe": 0.1410515,
+    "input_encode": 4.614799999999998e-05,
+    "latent_readback": 0.009509865,
+    "model_lora": 1.642e-06,
+    "text_encode": 0.000430862,
+    "video_prepare": 0.000246934,
+    "video_vae_decode": 4.057968302
+   },
+   "median_seconds": 13.2
+  }
+ ],
+ "concurrency": {
+  "n": 4,
+  "single_wall": 3.66,
+  "total_wall": 15.43,
+  "latency_min": 3.67,
+  "latency_max": 15.43,
+  "throughput_img_per_min": 15.55,
+  "parallel_speedup": 0.95
+ }
+}
