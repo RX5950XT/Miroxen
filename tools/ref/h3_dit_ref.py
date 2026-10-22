@@ -54,7 +54,8 @@ def conv(k):
 
 
 sd = {}
-for k, w in raw.items():
+for k in list(raw):
+    w = raw.pop(k)  # 邊轉邊釋放：fc1 會 cat 出新張量，不 pop 則尖峰多一份 FFN 權重
     if k.endswith("attn.qkv_proj.weight"):
         q, kk, v = w.chunk(3, dim=0)  # GGUF 已是連續 [q; k; v]
         base = conv(k).removesuffix("qkv_proj.weight")

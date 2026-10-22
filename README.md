@@ -51,7 +51,7 @@ build\miroxen.exe serve --port 8188
 |---|---|---|
 | 標準 DiT · Q8_0 | **`qwen-image-2.1-UC-Q8_0.gguf`** | [abenzerps/Qwen-Image-2.1-Uncensored-GGUF](https://huggingface.co/abenzerps/Qwen-Image-2.1-Uncensored-GGUF) |
 | Turbo DiT · Q8_0 | **`Qwen-Image-2.1-Turbo-Q8_0.gguf`** | [AtomicChat/Qwen-Image-2.1-Turbo-GGUF](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-GGUF)（原始：[Qwen/Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo)，Qwen Research License） |
-| 文字編碼器 · AD-Q4_K（去拒答） | **`Qwen-Image-2.1-Turbo-Abliterated-Uncensored-AD-Q4_K.gguf`** | [AtomicChat/Qwen-Image-2.1-Turbo-Abliterated-Uncensored-GGUF](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-Abliterated-Uncensored-GGUF) |
+| 文字編碼器 · AD-Q4_K（去拒答） | **`Qwen-Image-2.1-Turbo-Abliterated-Uncensored-AD-Q4_K.gguf`** | [AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF](https://huggingface.co/AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF)（2026-10-13 改名前的 revision `e3b01e9b…`） |
 | 視覺編碼器 · F16（編輯／參考圖用） | **`mmproj-Qwen3VL-8B-Instruct-F16.gguf`** | [Qwen/Qwen3-VL-8B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct-GGUF) |
 | 紋理修正 VAE · BF16 | **`vae/texture_fix_vae_for_qwen_image_2.1_bf16.safetensors`** | [madebyollin/texture-fix-vae-for-qwen-image-2.1](https://huggingface.co/madebyollin/texture-fix-vae-for-qwen-image-2.1/tree/1f80456b6de9d89043c133ff1f3875449b8bd016) |
 | 官方 VAE · BF16（沒有紋理修正版時使用） | `vae/qwen_image_2.1_vae_bf16.safetensors` | [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1) |
@@ -60,7 +60,7 @@ build\miroxen.exe serve --port 8188
 ```bat
 hf download abenzerps/Qwen-Image-2.1-Uncensored-GGUF qwen-image-2.1-UC-Q8_0.gguf --revision 6b34e59458d3eb7ba6a6f86a116aed5253dc02c3 --local-dir models/image/qwen-image-2.1
 hf download AtomicChat/Qwen-Image-2.1-Turbo-GGUF Qwen-Image-2.1-Turbo-Q8_0.gguf --local-dir models/image/qwen-image-2.1
-hf download AtomicChat/Qwen-Image-2.1-Turbo-Abliterated-Uncensored-GGUF Qwen-Image-2.1-Turbo-Abliterated-Uncensored-AD-Q4_K.gguf --local-dir models/image/qwen-image-2.1
+hf download AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF Qwen-Image-2.1-Turbo-Abliterated-Uncensored-AD-Q4_K.gguf --revision e3b01e9bfacc373148bdb93824496e0c72643250 --local-dir models/image/qwen-image-2.1
 hf download Qwen/Qwen3-VL-8B-Instruct-GGUF mmproj-Qwen3VL-8B-Instruct-F16.gguf --local-dir models/image/qwen-image-2.1
 ```
 
