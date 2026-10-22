@@ -69,9 +69,17 @@ function initEmbedding() {
   }
   const key = /^#key=([A-Za-z0-9_-]{16,128})$/.exec(location.hash);
   if (key) {
-    state.apiKey = key[1];
+    rememberKey(key[1]);
     history.replaceState(history.state, "", location.pathname + location.search);
+  } else {
+    try { state.apiKey = localStorage.getItem("miroxen-api-key") || ""; } catch (e) { /* 無痕模式等情況讀不到就每次重貼 */ }
   }
+}
+
+// 重新整理後不用再貼金鑰（只存在這台瀏覽器）
+function rememberKey(key) {
+  state.apiKey = key;
+  try { localStorage.setItem("miroxen-api-key", key); } catch (e) { /* 存不了只影響下次要重貼 */ }
 }
 
 // 內嵌時「模型與硬體」「API」交給外殼：模型清單改成右上角模型按鈕的彈出面板（搬 DOM，id 不變，渲染照舊）

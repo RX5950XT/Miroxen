@@ -307,7 +307,7 @@ function bindViews() {
   $("copy-api-base").addEventListener("click", () => copyWithStatus($("api-base").textContent, "address-copy-status", "已複製 " + $("api-base").textContent));
   $("api-connection").addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    state.apiKey = $("api-key").value.trim(); state.authRequired = false; closeSource();
+    rememberKey($("api-key").value.trim()); state.authRequired = false; closeSource();
     await refreshMeta(); await loadLoras();
     if (!state.authRequired) $("api-error").textContent = "";
     if (state.activeId) watch(state.activeId);

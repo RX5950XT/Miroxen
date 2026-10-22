@@ -18,7 +18,7 @@ G4 回 `Service Unavailable`（沒空機）就隔幾分鐘重試，或改 `--gpu
 
 **2. 使用**
 
-- **網頁面板**：瀏覽器開公開網址，在「API」分頁貼上金鑰（WSL 的 `~/.config/miroxen-colab/api_key`）即可生圖、生影片。
+- **網頁面板**：Telegram bot 和 `mx-colab tunnel` 給的網址後面帶 `#key=金鑰`，點開就自動登入（金鑰不會送到伺服器，面板讀完即從網址列清掉，並記在這台瀏覽器）。只拿到公開網址時，在「API」分頁貼上金鑰（WSL 的 `~/.config/miroxen-colab/api_key`）。
 - **API**：任何能發 HTTP 的地方都能呼叫（手機、其他電腦、n8n、自己的程式），標頭帶 `Authorization: Bearer <金鑰>`。
 
 ```bash
