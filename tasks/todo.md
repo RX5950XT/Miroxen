@@ -1,5 +1,10 @@
 # Miroxen 任務清單
 
+## Colab 部署工具併入 repo（2026-10-22）
+- [x] `colab_miroxen/deploy` 搬到 `deploy/`，`mx-colab` 的 repo／models 預設改相對路徑、`mx-colab.cmd` 改用自身位置、`mx_bench.py` 修正 import
+- [x] WSL `~/.local/bin/mx-colab` 改連新位置；README／AGENTS／CONTEXT 補說明
+- [x] 修正 Drive 程式包缺 `hf/processor/`（VM 生圖回「無法開啟 tokenizer」）：用 main 重建並重新 bundle
+
 ## 專案垃圾清理（2026-10-21）
 - [x] 刪除已合併的 `feat/linux-colab-build`（本機與遠端）
 - [x] 刪除 `out/trash`（已移除的 Viggle／Turbo8 加速 LoRA，2.6 GB）、`out/bench-720p` 舊效能暫存、空的 `out/tmp`、`out/` 根目錄測試圖、`.playwright-cli`、`tools/perf/__pycache__`；更早隔離的原版 DiT／未使用模型資料在本輪開始前已不存在

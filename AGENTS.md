@@ -16,3 +16,4 @@ Miroxen 是專為 Qwen-Image-2.1（文生圖／編輯）與 MiniMax-H3（影音�
 - 錯誤用 `MX_CHECK` / `MX_CUDA` 丟例外；不要靜默吞錯。
 - 大檔（模型權重）放 `models/`（已 gitignore），不要提交。
 - 文件用繁體中文；程式識別字用英文。
+- Colab 部署與 Telegram bot 在 `deploy/`（WSL 執行，說明見 `deploy/README.md`，背景事實見 `CONTEXT.md`）。

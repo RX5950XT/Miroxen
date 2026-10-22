@@ -1,0 +1,269 @@
+{
+ "gpu": "G4 RTX PRO 6000",
+ "size": "1280x704",
+ "date": "2026-10-21",
+ "miroxen": [
+  {
+   "case": "image fp8",
+   "runs": [
+    {
+     "case": "image fp8",
+     "seed": 42,
+     "seconds": 4.56,
+     "wall": 8.27,
+     "denoise": 4.3,
+     "steps": 40,
+     "sec_per_step": 0.107,
+     "url": "/files/job_00000002.png",
+     "timings": {
+      "denoise": 4.296003071,
+      "dit_prepare": 0.004425018,
+      "input": 1.2e-06,
+      "latent_layout_transfer": 0.00022406,
+      "lora": 3.2e-07,
+      "png_encode": 0.147376998,
+      "text_vision_encode": 0.022646999,
+      "vae_decode": 0.086130197,
+      "vae_encode": 5.2e-07
+     }
+    },
+    {
+     "case": "image fp8",
+     "seed": 43,
+     "seconds": 4.57,
+     "wall": 4.76,
+     "denoise": 4.31,
+     "steps": 40,
+     "sec_per_step": 0.108,
+     "url": "/files/job_00000003.png",
+     "timings": {
+      "denoise": 4.305463286,
+      "dit_prepare": 0.004292438,
+      "input": 9e-07,
+      "latent_layout_transfer": 0.00020089,
+      "lora": 3.1e-07,
+      "png_encode": 0.149534006,
+      "text_vision_encode": 0.022661599,
+      "vae_decode": 0.086138968,
+      "vae_encode": 4.5e-07
+     }
+    }
+   ],
+   "median_seconds": 4.5649999999999995
+  },
+  {
+   "case": "video fp8",
+   "runs": [
+    {
+     "case": "video fp8",
+     "seed": 42,
+     "seconds": 153.48,
+     "wall": 152.96,
+     "denoise": 144.93,
+     "steps": 29,
+     "sec_per_step": 4.997,
+     "url": "/files/job_00000005.mp4",
+     "timings": {
+      "audio_decode_wav": 0.120167989,
+      "denoise": 144.927013071,
+      "dit_prepare": 0.056916552,
+      "ffmpeg_finish": 0.229575424,
+      "ffmpeg_pipe": 0.15101121599999998,
+      "input_encode": 3.863000000001171e-05,
+      "latent_readback": 0.054296617,
+      "model_lora": 9.4e-07,
+      "text_encode": 0.238386734,
+      "video_prepare": 0.00014089,
+      "video_vae_decode": 7.700585059000001
+     }
+    },
+    {
+     "case": "video fp8",
+     "seed": 43,
+     "seconds": 153.45,
+     "wall": 157.37,
+     "denoise": 144.93,
+     "steps": 29,
+     "sec_per_step": 4.998,
+     "url": "/files/job_00000006.mp4",
+     "timings": {
+      "audio_decode_wav": 0.119869569,
+      "denoise": 144.934777152,
+      "dit_prepare": 0.053632417,
+      "ffmpeg_finish": 0.225810573,
+      "ffmpeg_pipe": 0.16130748,
+      "input_encode": 3.7109999999979104e-05,
+      "latent_readback": 0.054259077,
+      "model_lora": 1.03e-06,
+      "text_encode": 0.232616961,
+      "video_prepare": 0.000143509,
+      "video_vae_decode": 7.670541795
+     }
+    }
+   ],
+   "median_seconds": 153.46499999999997
+  },
+  {
+   "case": "image bf16",
+   "runs": [
+    {
+     "case": "image bf16",
+     "seed": 42,
+     "seconds": 7.55,
+     "wall": 7.95,
+     "denoise": 7.29,
+     "steps": 40,
+     "sec_per_step": 0.182,
+     "url": "/files/job_00000008.png",
+     "timings": {
+      "denoise": 7.292268465,
+      "dit_prepare": 0.004329738,
+      "input": 1.4e-06,
+      "latent_layout_transfer": 0.00021142,
+      "lora": 5.3e-07,
+      "png_encode": 0.144347768,
+      "text_vision_encode": 0.022253371,
+      "vae_decode": 0.086180233,
+      "vae_encode": 3.9e-07
+     }
+    },
+    {
+     "case": "image bf16",
+     "seed": 43,
+     "seconds": 7.56,
+     "wall": 7.95,
+     "denoise": 7.3,
+     "steps": 40,
+     "sec_per_step": 0.182,
+     "url": "/files/job_00000009.png",
+     "timings": {
+      "denoise": 7.295652543,
+      "dit_prepare": 0.004414129,
+      "input": 2.02e-06,
+      "latent_layout_transfer": 0.00017996,
+      "lora": 4.4e-07,
+      "png_encode": 0.146333047,
+      "text_vision_encode": 0.02225562,
+      "vae_decode": 0.086201953,
+      "vae_encode": 6.5e-07
+     }
+    }
+   ],
+   "median_seconds": 7.555
+  },
+  {
+   "case": "video bf16",
+   "runs": [
+    {
+     "case": "video bf16",
+     "seed": 42,
+     "seconds": 280.81,
+     "wall": 282.82,
+     "denoise": 271.14,
+     "steps": 29,
+     "sec_per_step": 9.35,
+     "url": "/files/job_0000000b.mp4",
+     "timings": {
+      "audio_decode_wav": 0.11976403,
+      "denoise": 271.137901798,
+      "dit_prepare": 0.056953857,
+      "ffmpeg_finish": 0.209382552,
+      "ffmpeg_pipe": 0.16683612999999997,
+      "input_encode": 4.0079999999997895e-05,
+      "latent_readback": 0.034862415,
+      "model_lora": 9.8e-07,
+      "text_encode": 0.231760513,
+      "video_prepare": 0.00011953,
+      "video_vae_decode": 8.855394702
+     }
+    },
+    {
+     "case": "video bf16",
+     "seed": 43,
+     "seconds": 280.88,
+     "wall": 282.15,
+     "denoise": 271.2,
+     "steps": 29,
+     "sec_per_step": 9.352,
+     "url": "/files/job_0000000c.mp4",
+     "timings": {
+      "audio_decode_wav": 0.120186289,
+      "denoise": 271.202935509,
+      "dit_prepare": 0.054964446,
+      "ffmpeg_finish": 0.226329795,
+      "ffmpeg_pipe": 0.15226088399999999,
+      "input_encode": 3.767000000001741e-05,
+      "latent_readback": 0.034903916,
+      "model_lora": 8.3e-07,
+      "text_encode": 0.232627641,
+      "video_prepare": 0.00014324,
+      "video_vae_decode": 8.859745046
+     }
+    }
+   ],
+   "median_seconds": 280.845
+  }
+ ],
+ "comfyui_image": [
+  {
+   "case": "image",
+   "runs": [
+    {
+     "total": 8.65,
+     "nodes": {
+      "te": 0.16,
+      "neg": 0.0,
+      "sample": 8.24,
+      "decode": 0.11,
+      "save": 0.14
+     }
+    },
+    {
+     "total": 8.94,
+     "nodes": {
+      "te": 0.16,
+      "neg": 0.0,
+      "sample": 8.23,
+      "decode": 0.11,
+      "save": 0.43
+     }
+    }
+   ],
+   "median_total": 8.795
+  }
+ ],
+ "comfyui_video": [
+  {
+   "case": "video",
+   "runs": [
+    {
+     "total": 251.38,
+     "nodes": {
+      "te": 0.69,
+      "neg": 0.0,
+      "sample": 241.3,
+      "split": 0.0,
+      "adecode": 0.08,
+      "decode": 6.93,
+      "mux": 0.0,
+      "save": 2.38
+     }
+    },
+    {
+     "total": 251.66,
+     "nodes": {
+      "te": 0.69,
+      "neg": 0.0,
+      "sample": 241.48,
+      "split": 0.0,
+      "adecode": 0.08,
+      "decode": 6.94,
+      "mux": 0.0,
+      "save": 2.46
+     }
+    }
+   ],
+   "median_total": 251.51999999999998
+  }
+ ]
+}

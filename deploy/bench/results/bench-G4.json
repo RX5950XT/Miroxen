@@ -1,0 +1,140 @@
+{
+ "gpus": [
+  {
+   "free": 101388779520,
+   "index": 0,
+   "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+   "power_w": 88.83,
+   "temperature_c": 36,
+   "total": 101974081536,
+   "utilization_percent": 0
+  }
+ ],
+ "cases": [
+  {
+   "case": "圖片 標準 40 步 1024²",
+   "seed": 42,
+   "seconds": 5.17,
+   "wall": 8.36,
+   "denoise": 4.9,
+   "steps": 40,
+   "sec_per_step": 0.123,
+   "url": "/files/job_00000002.png",
+   "timings": {
+    "denoise": 4.902355108,
+    "dit_prepare": 0.00512861,
+    "input": 1.65e-06,
+    "latent_layout_transfer": 2.812e-05,
+    "lora": 5.2e-07,
+    "png_encode": 0.169081121,
+    "text_vision_encode": 0.00018638,
+    "vae_decode": 0.088567531,
+    "vae_encode": 6.9e-07
+   },
+   "median_seconds": 5.17
+  },
+  {
+   "case": "圖片 Turbo 8 步 1024²",
+   "seed": 42,
+   "seconds": 1.25,
+   "wall": 2.97,
+   "denoise": 0.98,
+   "steps": 8,
+   "sec_per_step": 0.123,
+   "url": "/files/job_00000005.png",
+   "timings": {
+    "denoise": 0.984250737,
+    "dit_prepare": 0.00517981,
+    "input": 1.57e-06,
+    "latent_layout_transfer": 3.742e-05,
+    "lora": 5.1e-07,
+    "png_encode": 0.167155473,
+    "text_vision_encode": 0.00020119,
+    "vae_decode": 0.088677251,
+    "vae_encode": 6.6e-07
+   },
+   "median_seconds": 1.25
+  },
+  {
+   "case": "影片 完整 30 步 864×480 56 幀",
+   "seed": 42,
+   "seconds": 20.73,
+   "wall": 22.59,
+   "denoise": 18.59,
+   "steps": 29,
+   "sec_per_step": 0.641,
+   "url": "/files/job_00000008.mp4",
+   "timings": {
+    "audio_decode_wav": 0.091242911,
+    "denoise": 18.585495614,
+    "dit_prepare": 0.01475334,
+    "ffmpeg_finish": 0.177217013,
+    "ffmpeg_pipe": 0.065785941,
+    "input_encode": 2.3490000000000007e-05,
+    "latent_readback": 0.051430111,
+    "model_lora": 1.1e-06,
+    "text_encode": 0.00018792,
+    "video_prepare": 0.00015717,
+    "video_vae_decode": 1.74322486
+   },
+   "median_seconds": 20.78
+  },
+  {
+   "case": "影片 8 步 LoRA 864×480 56 幀",
+   "seed": 42,
+   "seconds": 7.38,
+   "wall": 10.3,
+   "denoise": 5.25,
+   "steps": 8,
+   "sec_per_step": 0.656,
+   "url": "/files/job_0000000b.mp4",
+   "timings": {
+    "audio_decode_wav": 0.091503998,
+    "denoise": 5.249522827,
+    "dit_prepare": 0.01475954,
+    "ffmpeg_finish": 0.168399456,
+    "ffmpeg_pipe": 0.072132529,
+    "input_encode": 1.8450000000000015e-05,
+    "latent_readback": 0.051315319,
+    "model_lora": 1.19e-06,
+    "text_encode": 0.00020643,
+    "video_prepare": 0.00012933,
+    "video_vae_decode": 1.7339374250000001
+   },
+   "median_seconds": 7.38
+  },
+  {
+   "case": "影片 4 步 LoRA 864×480 56 幀",
+   "seed": 42,
+   "seconds": 4.79,
+   "wall": 5.22,
+   "denoise": 2.68,
+   "steps": 4,
+   "sec_per_step": 0.671,
+   "url": "/files/job_0000000e.mp4",
+   "timings": {
+    "audio_decode_wav": 0.091765608,
+    "denoise": 2.682316173,
+    "dit_prepare": 0.014745929,
+    "ffmpeg_finish": 0.154729696,
+    "ffmpeg_pipe": 0.06496529799999999,
+    "input_encode": 1.8379999999999997e-05,
+    "latent_readback": 0.051336898,
+    "model_lora": 1.05e-06,
+    "text_encode": 0.00021614,
+    "video_prepare": 0.00013852,
+    "video_vae_decode": 1.729553457
+   },
+   "median_seconds": 4.79
+  }
+ ],
+ "concurrency": {
+  "n": 4,
+  "single_wall": 2.91,
+  "total_wall": 6.47,
+  "latency_min": 2.8,
+  "latency_max": 6.46,
+  "throughput_img_per_min": 37.12,
+  "parallel_speedup": 1.8
+ }
+}
