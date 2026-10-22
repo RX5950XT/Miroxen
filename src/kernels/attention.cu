@@ -79,7 +79,7 @@ __device__ __forceinline__ void copy_kv(bf16* ks, bf16* vs, const bf16* k, const
 template <int kKeys, bool Causal>
 __device__ __forceinline__ void online_softmax(float (&score)[kKeys / 8][4], float (&maximum)[2],
     float (&sum)[2], float (&alpha)[2], int qrow, int lane, int64_t start, const AttnParams& p) {
-  const float scale = p.scale * 1.4426950408889634f;
+  const float scale = p.scale;
   // 非因果且整塊 key 都在範圍內時不用遮罩（超出 Sq 的 query 列不會寫回）；分支整個 block 一致。
   const bool edge = Causal || start + kKeys > p.Skv;
   float tilemax[2] = {-CUDART_INF_F, -CUDART_INF_F}, tilesum[2] = {}, base[2];
@@ -87,7 +87,7 @@ __device__ __forceinline__ void online_softmax(float (&score)[kKeys / 8][4], flo
   for (int n = 0; n < kKeys / 8; ++n) {
     #pragma unroll
     for (int j = 0; j < 4; ++j) {
-      float s = score[n][j] * scale;
+      float s = score[n][j] * scale * 1.4426950408889634f;
       if (edge) {
         int row = qrow + lane / 4 + (j / 2) * 8;
         int64_t col = start + n * 8 + (lane & 3) * 2 + (j & 1);
