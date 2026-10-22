@@ -43,9 +43,18 @@ def endpoint():
         return ""
 
 
+def api_key():
+    return open(os.path.join(CONF, "api_key")).read().strip()
+
+
+def panel():
+    """面板網址帶 #key=，手機點開就自動登入（# 後面不會送到伺服器，面板讀完即從網址列清掉）。"""
+    url = endpoint()
+    return f"{url}/#key={api_key()}" if url else ""
+
+
 def jobs(url):
-    key = open(os.path.join(CONF, "api_key")).read().strip()
-    req = urllib.request.Request(f"{url}/v1/jobs", headers={"Authorization": f"Bearer {key}"})
+    req = urllib.request.Request(f"{url}/v1/jobs", headers={"Authorization": f"Bearer {api_key()}"})
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.load(r)
 
@@ -63,7 +72,7 @@ def do_up(chat):
         return say(chat, "正在開機或關機中，請稍等")
     try:
         if endpoint():
-            return say(chat, f"已經在線上：{endpoint()}")
+            return say(chat, f"已經在線上：{panel()}")
         for gpu in GPUS:
             say(chat, f"搶 {gpu} 中…")
             try:
@@ -71,7 +80,7 @@ def do_up(chat):
             except subprocess.TimeoutExpired:
                 rc, out = 1, "逾時"
             if rc == 0 and endpoint():
-                return say(chat, f"上線了（{gpu}）：{endpoint()}\n閒置 {IDLE / 60:.0f} 分鐘自動關機")
+                return say(chat, f"上線了（{gpu}）：{panel()}\n閒置 {IDLE / 60:.0f} 分鐘自動關機")
             say(chat, f"{gpu} 失敗：{out.splitlines()[-1] if out else '?'}")
             mx("down", timeout=300)  # 收掉開到一半的 VM，免得空燒點數
         say(chat, "全部 GPU 都搶不到，晚點再 /up")
@@ -135,7 +144,7 @@ def main():
             elif text == "/down":
                 threading.Thread(target=do_down, args=(chat,), daemon=True).start()
             elif text == "/status":
-                say(chat, f"網址：{endpoint() or '（沒開）'}\n" + mx("status", timeout=60)[1][-1500:])
+                say(chat, f"網址：{panel() or '（沒開）'}\n" + mx("status", timeout=60)[1][-1500:])
             else:
                 say(chat, "指令：/up 開機（G4→A100→L4）、/status、/down")
 

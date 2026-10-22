@@ -114,7 +114,7 @@ cmd_up() {
 cmd_tunnel() {
   alive || die "session $SESSION 不存在"
   master  # 主連線本身就帶著 8188 轉發；還活著就沿用（先 -O exit 再檢查會撞到它還沒關完）
-  echo "本機轉發：http://127.0.0.1:$PORT（Windows 瀏覽器也能開）"
+  echo "本機轉發：http://127.0.0.1:$PORT/#key=$(key)（Windows 瀏覽器也能開，點開自動帶金鑰）"
 }
 
 cmd_status() {
