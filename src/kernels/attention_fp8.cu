@@ -1,5 +1,6 @@
 // SageAttention2 式低精度注意力：Q·Kᵀ INT8（m16n8k32 s8）、P·V FP8 e4m3（m16n8k32 e4m3），fp32 累加。
 // 前處理把 Q、K 量化成 [H][S][D] int8、V 量化並轉置成 [H][D][S] fp8，主核心只讀量化資料。
+// sm_86～88 沒有 FP8 tensor core：P·V 改用 bf16（同 SageAttention1），V 直接讀原始 bf16。
 #include "kernels/attention.h"
 
 #include <cuda_fp8.h>
@@ -135,10 +136,34 @@ __device__ __forceinline__ void cp_async16(void* dst, const void* src) {
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(smem_addr(dst)), "l"(src) : "memory");
 }
 
+// ok = false 時不讀 src，目的地補 0。
+__device__ __forceinline__ void cp_async16z(void* dst, const void* src, bool ok) {
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(smem_addr(dst)), "l"(src), "r"(ok ? 16 : 0)
+               : "memory");
+}
+
 __device__ __forceinline__ void ldsm_x4(unsigned (&r)[4], const void* p) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
                : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
                : "r"(smem_addr(p)));
+}
+
+__device__ __forceinline__ void ldsm_x4_trans(unsigned (&r)[4], const void* p) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+               : "r"(smem_addr(p)));
+}
+
+__device__ __forceinline__ void mma_bf16(float (&c)[4], const unsigned (&a)[4], unsigned b0, unsigned b1) {
+  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "
+               "{%0,%1,%2,%3};"
+               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+               : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+
+__device__ __forceinline__ unsigned pack_bf16(float x, float y) {
+  __nv_bfloat162_raw pair = __floats2bfloat162_rn(x, y);
+  return unsigned(pair.x) | (unsigned(pair.y) << 16);
 }
 
 // 列寬 R bytes 的 smem tile：以 16 bytes 為單位做 XOR swizzle，讓 ldmatrix 的 8 列落在不同 bank。
@@ -191,13 +216,18 @@ constexpr bool kSplitAcc = false;
 constexpr bool kSplitAcc = true;
 #endif
 
-template <int D>
+// BfPV：P·V 用 bf16 m16n8k16、V 讀原始 bf16 v（sm_86～88）；否則用 FP8、讀量化好的 vt。
+template <int D, bool BfPV>
 // 每個 SM 至少 3 個小 CTA：sm_120a 的 D=128 可用 168 registers，免去迴圈內的 spill。
 __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, const int8_t* ki, const uint8_t* vt,
-                                                          const float* qs, const float* ks, const float* va,
-                                                          bf16* o, AttnParams p, int64_t sq_pad, int64_t skv_pad) {
-#if __CUDA_ARCH__ >= 890
-  constexpr int KT = kK * D, VT = D * kK;
+                                                          const bf16* v, const float* qs, const float* ks,
+                                                          const float* va, bf16* o, AttnParams p, int64_t sq_pad,
+                                                          int64_t skv_pad) {
+#if __CUDA_ARCH__ >= 800
+#if __CUDA_ARCH__ < 890
+  if constexpr (!BfPV) __trap();
+#endif
+  constexpr int KT = kK * D, VT = D * kK * (BfPV ? 2 : 1);
   extern __shared__ __align__(128) unsigned char sm[];
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
   const int head = blockIdx.y, kvh = head / (p.Hq / p.Hkv);
@@ -224,10 +254,19 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
       const int r = i / (D / 16), u = i % (D / 16);
       cp_async16(kd + swz<D>(r, u), kg + r * D + u * 16);
     }
-    const uint8_t* vg = vt + int64_t(kvh) * D * skv_pad + int64_t(tile) * kK;
-    for (int i = threadIdx.x; i < VT / 16; i += kW * 32) {
-      const int r = i / (kK / 16), u = i % (kK / 16);
-      cp_async16(vd + swz<kK>(r, u), vg + int64_t(r) * skv_pad + u * 16);
+    if constexpr (BfPV) {  // [key][D] bf16；超出 Skv 的列補 0（P 雖是 0，沒初始化的 V 可能是 NaN）
+      const bf16* vg = v + int64_t(tile) * kK * p.kv_stride + kvh * D;
+      for (int i = threadIdx.x; i < VT / 16; i += kW * 32) {
+        const int r = i / (D / 8), u = i % (D / 8);
+        const bool ok = tile * kK + r < p.Skv;
+        cp_async16z(vd + swz<2 * D>(r, u), ok ? vg + int64_t(r) * p.kv_stride + u * 8 : v, ok);
+      }
+    } else {
+      const uint8_t* vg = vt + int64_t(kvh) * D * skv_pad + int64_t(tile) * kK;
+      for (int i = threadIdx.x; i < VT / 16; i += kW * 32) {
+        const int r = i / (kK / 16), u = i % (kK / 16);
+        cp_async16(vd + swz<kK>(r, u), vg + int64_t(r) * skv_pad + u * 16);
+      }
     }
     asm volatile("cp.async.commit_group;" ::: "memory");
   };
@@ -288,8 +327,8 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
       const float next = fmaxf(mx[r], i2f(im[r]) * sc);
       alpha[r] = ex2(mx[r] - next);  // 第一個 tile：exp2(−inf) = 0
       mx[r] = next;
-      // 機率直接算成 448·p（log2 448 併進指數，省一次乘法）；i2f 的減法也併進同一個 FFMA（只捨入一次）。
-      nm[r] = 8.807354922057604f - next - 12582912.f * sc;
+      // FP8 的機率直接算成 448·p（log2 448 併進指數，省一次乘法）；i2f 的減法也併進同一個 FFMA（只捨入一次）。
+      nm[r] = (BfPV ? 0.f : 8.807354922057604f) - next - 12582912.f * sc;
     }
 #pragma unroll
     for (int n = 0; n < kK / 8; ++n)
@@ -313,31 +352,52 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
         for (int j = 0; j < 4; ++j) acc[d][j] *= alpha[j >> 1];
     }
 
-    // O += P·V（f 已是 448·p，用滿 e4m3 範圍）。
-    unsigned a[kK / 32][4];
+    if constexpr (BfPV) {
+      // P 的 C fragment 依自然 key 順序直接當 m16n8k16 的 A fragment；V 用 ldmatrix.trans 取 B fragment。
+      unsigned a[kK / 16][4];
 #pragma unroll
-    for (int kc = 0; kc < kK / 32; ++kc) {
-      a[kc][0] = pack_fp8x4(f[4 * kc][0], f[4 * kc][1], f[4 * kc + 1][0], f[4 * kc + 1][1]);
-      a[kc][1] = pack_fp8x4(f[4 * kc][2], f[4 * kc][3], f[4 * kc + 1][2], f[4 * kc + 1][3]);
-      a[kc][2] = pack_fp8x4(f[4 * kc + 2][0], f[4 * kc + 2][1], f[4 * kc + 3][0], f[4 * kc + 3][1]);
-      a[kc][3] = pack_fp8x4(f[4 * kc + 2][2], f[4 * kc + 2][3], f[4 * kc + 3][2], f[4 * kc + 3][3]);
-    }
+      for (int kc = 0; kc < kK / 16; ++kc) {
+        a[kc][0] = pack_bf16(f[2 * kc][0], f[2 * kc][1]);
+        a[kc][1] = pack_bf16(f[2 * kc][2], f[2 * kc][3]);
+        a[kc][2] = pack_bf16(f[2 * kc + 1][0], f[2 * kc + 1][1]);
+        a[kc][3] = pack_bf16(f[2 * kc + 1][2], f[2 * kc + 1][3]);
+      }
 #pragma unroll
-    for (int dn = 0; dn < D / 8; dn += 2) {
-      float t0[4] = {}, t1[4] = {};
-      float(&c0)[4] = kSplitAcc ? t0 : acc[dn];
-      float(&c1)[4] = kSplitAcc ? t1 : acc[dn + 1];
+      for (int dn = 0; dn < D / 8; dn += 2)
+#pragma unroll
+        for (int kc = 0; kc < kK / 16; ++kc) {
+          unsigned b[4];
+          ldsm_x4_trans(b, vd + swz<2 * D>(kc * 16 + (lane & 7) + ((lane >> 3) & 1) * 8, dn + (lane >> 4)));
+          mma_bf16(acc[dn], a[kc], b[0], b[1]);
+          mma_bf16(acc[dn + 1], a[kc], b[2], b[3]);
+        }
+    } else {
+      // O += P·V（f 已是 448·p，用滿 e4m3 範圍）。
+      unsigned a[kK / 32][4];
 #pragma unroll
       for (int kc = 0; kc < kK / 32; ++kc) {
-        unsigned b[4];
-        const int j = lane >> 3;
-        ldsm_x4(b, vd + swz<kK>((dn + (j >> 1)) * 8 + (lane & 7), kc * 2 + (j & 1)));
-        mma_fp8(c0, a[kc], b[0], b[1]);
-        mma_fp8(c1, a[kc], b[2], b[3]);
+        a[kc][0] = pack_fp8x4(f[4 * kc][0], f[4 * kc][1], f[4 * kc + 1][0], f[4 * kc + 1][1]);
+        a[kc][1] = pack_fp8x4(f[4 * kc][2], f[4 * kc][3], f[4 * kc + 1][2], f[4 * kc + 1][3]);
+        a[kc][2] = pack_fp8x4(f[4 * kc + 2][0], f[4 * kc + 2][1], f[4 * kc + 3][0], f[4 * kc + 3][1]);
+        a[kc][3] = pack_fp8x4(f[4 * kc + 2][2], f[4 * kc + 2][3], f[4 * kc + 3][2], f[4 * kc + 3][3]);
       }
-      if (kSplitAcc) {
 #pragma unroll
-        for (int j = 0; j < 4; ++j) acc[dn][j] += t0[j], acc[dn + 1][j] += t1[j];
+      for (int dn = 0; dn < D / 8; dn += 2) {
+        float t0[4] = {}, t1[4] = {};
+        float(&c0)[4] = kSplitAcc ? t0 : acc[dn];
+        float(&c1)[4] = kSplitAcc ? t1 : acc[dn + 1];
+#pragma unroll
+        for (int kc = 0; kc < kK / 32; ++kc) {
+          unsigned b[4];
+          const int j = lane >> 3;
+          ldsm_x4(b, vd + swz<kK>((dn + (j >> 1)) * 8 + (lane & 7), kc * 2 + (j & 1)));
+          mma_fp8(c0, a[kc], b[0], b[1]);
+          mma_fp8(c1, a[kc], b[2], b[3]);
+        }
+        if (kSplitAcc) {
+#pragma unroll
+          for (int j = 0; j < 4; ++j) acc[dn][j] += t0[j], acc[dn + 1][j] += t1[j];
+        }
       }
     }
   }
@@ -349,9 +409,10 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
     for (int r = 0; r < 2; ++r) {
       const int row = q0 + g + r * 8, col = d * 8 + 2 * t;
       if (row >= p.Sq) continue;
-      const float inv = 1.f / (448.f * l[r]);  // l 已含 P 的 448；另一個 448 是 V 的 448/amax
+      const float inv = 1.f / ((BfPV ? 1.f : 448.f) * l[r]);  // l 已含 P 的 448；另一個 448 是 V 的 448/amax
+      const float v0 = BfPV ? 1.f : vh[col], v1 = BfPV ? 1.f : vh[col + 1];
       *reinterpret_cast<__nv_bfloat162*>(o + int64_t(row) * p.o_stride + head * D + col) =
-          __floats2bfloat162_rn(acc[d][2 * r] * vh[col] * inv, acc[d][2 * r + 1] * vh[col + 1] * inv);
+          __floats2bfloat162_rn(acc[d][2 * r] * v0 * inv, acc[d][2 * r + 1] * v1 * inv);
     }
 #else
   __trap();
@@ -359,7 +420,8 @@ __global__ void __launch_bounds__(kW * 32, 3) fp8_attn_kernel(const int8_t* qi, 
 }
 
 template <int D>
-void run(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams& p, char* ws, cudaStream_t s) {
+void run(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams& p, char* ws, bool bf_pv,
+         cudaStream_t s) {
   const Layout L = layout(p);
   int8_t* qi = reinterpret_cast<int8_t*>(ws + L.qi);
   int8_t* ki = reinterpret_cast<int8_t*>(ws + L.ki);
@@ -374,10 +436,15 @@ void run(const bf16* q, const bf16* k, const bf16* v, bf16* o, const AttnParams&
                                                                            p.scale * 1.4426950408889634f, qi, qs);
   quant_rows_kernel<D, kK><<<dim3(unsigned(L.skv / kK), p.Hkv), 128, 0, s>>>(k, p.kv_stride, p.Skv, L.skv, km, 1.f,
                                                                              ki, ks);
-  v_quant_kernel<D><<<dim3(unsigned(L.skv / kK), p.Hkv), 256, 0, s>>>(v, p, L.skv, va, vt);
-  const int smem = 2 * (kK * D + D * kK);
-  fp8_attn_kernel<D><<<dim3(unsigned(L.sq / kQ), p.Hq), kW * 32, smem, s>>>(qi, ki, vt, qs, ks, va, o, p, L.sq,
-                                                                            L.skv);
+  const dim3 grid(unsigned(L.sq / kQ), p.Hq);
+  if (bf_pv) {
+    fp8_attn_kernel<D, true><<<grid, kW * 32, 2 * (kK * D + D * kK * 2), s>>>(qi, ki, vt, v, qs, ks, va, o, p, L.sq,
+                                                                              L.skv);
+  } else {
+    v_quant_kernel<D><<<dim3(unsigned(L.skv / kK), p.Hkv), 256, 0, s>>>(v, p, L.skv, va, vt);
+    fp8_attn_kernel<D, false><<<grid, kW * 32, 2 * (kK * D + D * kK), s>>>(qi, ki, vt, v, qs, ks, va, o, p, L.sq,
+                                                                           L.skv);
+  }
   MX_KCHECK();
 }
 
@@ -409,7 +476,9 @@ bool flash_attn_fp8_supported(int device) {
   int major = 0, minor = 0;
   MX_CUDA(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
   MX_CUDA(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device));
-  return major * 10 + minor >= 89;
+  // sm_86（GeForce Ampere 等）bf16 MMA 的 fp32 累加只有半速，INT8 Q·Kᵀ 實測快 1.5～1.8 倍；
+  // A100（sm_80）bf16 全速，實測和 bf16 FlashAttention 一樣快（190 TFLOPS），不走這條。
+  return major * 10 + minor >= 86;
 }
 
 bool flash_attn_fp8_ok(const bf16* q, const bf16* k, const bf16* v, const bf16* o, const AttnParams& p) {
@@ -421,8 +490,13 @@ void flash_attn_fp8(const bf16* q, const bf16* k, const bf16* v, bf16* o, const 
   const AttnParams a = with_defaults(p);
   if (!ws || !fp8_ok(q, k, v, o, a)) return flash_attn(q, k, v, o, p, s);
   MX_CHECK((reinterpret_cast<uintptr_t>(ws) & 255) == 0, "flash_attn_fp8: workspace must be 256-byte aligned");
-  if (a.D == 64) run<64>(q, k, v, o, a, static_cast<char*>(ws), s);
-  else run<128>(q, k, v, o, a, static_cast<char*>(ws), s);
+  int dev = 0, major = 0, minor = 0;
+  MX_CUDA(cudaGetDevice(&dev));
+  MX_CUDA(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev));
+  MX_CUDA(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev));
+  const bool bf_pv = major * 10 + minor < 89;
+  if (a.D == 64) run<64>(q, k, v, o, a, static_cast<char*>(ws), bf_pv, s);
+  else run<128>(q, k, v, o, a, static_cast<char*>(ws), bf_pv, s);
 }
 
 }  // namespace mx

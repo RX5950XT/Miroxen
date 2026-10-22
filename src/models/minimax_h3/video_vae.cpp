@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -561,6 +562,12 @@ void H3VideoVae::decode(Ctx& c,const float* z,int64_t F,int64_t H,int64_t W,cons
     }
     sink(rgb.data(),n);emitted+=n;
   };
+  // 轉 RGB＋送出在背景做，和下一段的 GPU 解碼重疊（G4 每段省約 150 ms）；一次只有一段在跑，順序不變。
+  std::future<void> pending;
+  auto emit_async=[&](std::vector<float> px,size_t off,int n) {
+    if(pending.valid()) pending.get();
+    pending=std::async(std::launch::async,[&emit,px=std::move(px),off,n]{emit(px.data()+off,n);});
+  };
   for(int i=0;i<chunks;++i) {
     int start=i*v.chunk,T=std::min(v.chunk+v.overlap,int(F)+pad-start);
     auto pixels=v.decode_clip(c,z,int(F),int(H),int(W),start,T);
@@ -569,10 +576,11 @@ void H3VideoVae::decode(Ctx& c,const float* z,int64_t F,int64_t H,int64_t W,cons
       float f=float(t)/v.foverlap;
       for(size_t j=0;j<frame;++j) first[size_t(t)*frame+j]=overlap[size_t(t)*frame+j]*(1.f-f)+first[size_t(t)*frame+j]*f;
     }
-    emit(first,v.clip);
     size_t tail=size_t(v.chunk*v.pt+v.pre)*frame;
     overlap.assign(pixels.begin()+tail,pixels.end());
+    emit_async(std::move(pixels),frame*v.pre,v.clip);
   }
+  if(pending.valid()) pending.get();
   emit(overlap.data(),int(overlap.size()/frame));MX_CHECK(emitted==target,"H3 VAE decode 影格數不符");
 }
 void H3VideoVae::encode_image(Ctx& c,const uint8_t* rgb,int64_t H,int64_t W,float* z) {

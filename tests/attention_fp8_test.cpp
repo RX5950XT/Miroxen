@@ -1,4 +1,4 @@
-// FP8/INT8 注意力：對樸素參考實作的相對誤差，並和 bf16 FlashAttention 比速度。sm < 89 略過。
+// FP8/INT8 注意力：對樸素參考實作的相對誤差，並和 bf16 FlashAttention 比速度。不支援的卡略過（86～88 的 P·V 是 bf16）。
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -97,11 +97,8 @@ static void bench(int S, int H, int D) {
 
 int main() {
   try {
-    int major = 0, minor = 0;
-    MX_CUDA(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, 0));
-    MX_CUDA(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, 0));
-    if (major * 10 + minor < 89) {
-      std::printf("GPU0 不支援 FP8 tensor core，略過\n");
+    if (!flash_attn_fp8_supported(0)) {
+      std::printf("GPU0 不走低精度注意力，略過\n");
       return 0;
     }
     MX_CUDA(cudaSetDevice(0));

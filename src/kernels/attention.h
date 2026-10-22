@@ -23,10 +23,11 @@ void flash_attn(const bf16* q, const bf16* k, const bf16* v, bf16* o, const Attn
 
 // 低精度注意力（SageAttention2 式）：Q·Kᵀ 用 INT8（Q 每 16 列、K 每 64 列一個縮放，K 先減去每通道平均，
 // softmax 不變），P·V 用 FP8 e4m3（V 每通道縮放），都是 fp32 累加。GeForce Blackwell 上這兩種 tensor core
-// 是 bf16(fp32 累加) 的 4 倍。只支援 causal=0、D ∈ {64, 128}、kv_stride/q_stride 為 8 的倍數且 16 bytes 對齊、
-// sm_89 以上；其他情況自動改用 flash_attn。ws 至少 flash_attn_fp8_workspace(p) bytes、256 對齊。
+// 是 bf16(fp32 累加) 的 4 倍。sm_86～88 沒有 FP8：P·V 改用 bf16，只有 Q·Kᵀ 走 INT8。
+// 只支援 causal=0、D ∈ {64, 128}、kv_stride/q_stride 為 8 的倍數且 16 bytes 對齊、
+// sm_86 以上；其他情況自動改用 flash_attn。ws 至少 flash_attn_fp8_workspace(p) bytes、256 對齊。
 size_t flash_attn_fp8_workspace(const AttnParams& p);
-// 這張卡有沒有 FP8 注意力用的 tensor core（sm_89 以上；和線性層的區塊縮放 FP8 是兩回事）。
+// 這張卡能不能走這條低精度注意力（sm_86 以上，A100 沒有收益所以不算；和線性層的區塊縮放 FP8 是兩回事）。
 bool flash_attn_fp8_supported(int device);
 // 會走 FP8 路徑時，主 kernel 只讀工作區（q/k/v 已先量化進去），o 可以和 q 同一塊。
 bool flash_attn_fp8_ok(const bf16* q, const bf16* k, const bf16* v, const bf16* o, const AttnParams& p);
