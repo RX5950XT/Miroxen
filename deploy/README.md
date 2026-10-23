@@ -219,5 +219,5 @@ TG_TOKEN=<BotFather 給的 token> python3 deploy/bot/tg_bot.py --register-comman
 
 - `/up`：依 `MX_GPUS`（預設 `G4 A100 L4`）逐一 `mx-colab up`，成功就回公開網址；失敗會先 `mx-colab down` 收掉半開的 VM 再試下一張。
 - 每分鐘查公開網址的 `/v1/jobs`：`MX_IDLE_MIN`（預設 30）分鐘內沒有新工作、也沒有排隊／執行中的就自動關機；連續 5 分鐘連不上（VM 被回收）也會關。
-- `/status`、`/down`、`/id`。未設定 `TG_CHAT_ID` 時，必須明確選擇 BotFather 存取模式；未配置任何存取控制時 bot 不會啟動。
+- `/status`、`/down`、`/id`。未設定 `TG_CHAT_ID` 時 bot 照常啟動，只靠 BotFather 的 `Restrict bot usage` 擋人；`TG_ACCESS_MODE` 設成空白或 `botfather` 以外的值時 bot 不會啟動。
 - bot 跑在本機 WSL，電腦關機或 WSL 結束 bot 就停（VM 不受影響，但不會再自動關機）。
