@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Telegram bot：/up 自動搶 GPU（依序 G4 → A100 → L4）開 Miroxen 並回傳公開網址，沒人用就自動關機。
 在 WSL 執行（要用 mx-colab）：TG_TOKEN=... TG_CHAT_ID=123 python3 tg_bot.py
-  TG_CHAT_ID  允許操作的 chat id（逗號分隔）；不設時 bot 只回你的 chat id，方便第一次設定
+  TG_CHAT_ID      程式端允許的 chat id（逗號分隔）；有設定時由程式白名單限制
+  TG_ACCESS_MODE  預設 botfather；沒設 TG_CHAT_ID 時依賴 BotFather Restrict bot usage
   MX_GPUS     搶機順序，預設 "G4 A100 L4"
   MX_IDLE_MIN 連續幾分鐘沒有新工作、佇列也空就關機，預設 30
 指令：/up /status /down /id
@@ -14,13 +15,46 @@ EP = os.path.join(CONF, f"endpoint-{os.environ.get('MX_SESSION', 'mx')}")
 GPUS = os.environ.get("MX_GPUS", "G4 A100 L4").split()
 IDLE = float(os.environ.get("MX_IDLE_MIN", "30")) * 60
 ALLOWED = {c.strip() for c in os.environ.get("TG_CHAT_ID", "").split(",") if c.strip()}
+TG_ACCESS_MODE = os.environ.get("TG_ACCESS_MODE", "botfather").strip().lower()
 lock = threading.Lock()  # 同時只跑一個 up/down
+COMMANDS = [
+    {"command": "up", "description": "啟動 Miroxen GPU 服務"},
+    {"command": "status", "description": "查看服務與 GPU 狀態"},
+    {"command": "down", "description": "關閉 Miroxen GPU 服務"},
+    {"command": "id", "description": "顯示目前對話的 chat ID"},
+]
 
 
 def tg(method, **params):
-    url = f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/{method}"
+    token = os.environ.get("TG_TOKEN")
+    if not token:
+        raise RuntimeError("請設定 TG_TOKEN")
+    url = f"https://api.telegram.org/bot{token}/{method}"
     with urllib.request.urlopen(url, urllib.parse.urlencode(params).encode(), timeout=70) as r:
         return json.load(r)["result"]
+
+
+def register_commands():
+    """設定並讀回 Telegram 命令選單，避免僅靠 bot 回覆文字說明。"""
+    payload = json.dumps(COMMANDS, ensure_ascii=False)
+    if tg("setMyCommands", commands=payload) is not True:
+        raise RuntimeError("Telegram 未確認命令註冊")
+    registered = tg("getMyCommands")
+    if registered != COMMANDS:
+        raise RuntimeError("Telegram 命令讀回與設定不一致")
+    print("已註冊指令：" + "、".join("/" + item["command"] for item in COMMANDS), flush=True)
+
+
+def access_config_error():
+    if TG_ACCESS_MODE not in ("", "botfather"):
+        return "TG_ACCESS_MODE 只接受空白或 botfather"
+    return ""
+
+
+def is_authorized_chat(chat):
+    if ALLOWED:
+        return chat in ALLOWED
+    return TG_ACCESS_MODE in ("", "botfather")
 
 
 def say(chat, text):
@@ -119,6 +153,18 @@ def watchdog(chat_of):
 
 
 def main():
+    config_error = access_config_error()
+    if config_error:
+        raise SystemExit("存取控制設定錯誤：" + config_error)
+    if ALLOWED:
+        print("存取控制：TG_CHAT_ID 程式白名單；BotFather 若啟用限制，實際允許者為兩者交集", flush=True)
+    else:
+        print("存取控制：僅依賴 BotFather；請確認 Restrict bot usage 已開啟且允許名單正確", flush=True)
+    try:
+        register_commands()
+    except Exception as e:
+        # 不輸出可能含 API URL 的例外細節；命令選單失敗不影響既有訊息功能。
+        print(f"Telegram 指令註冊失敗（bot 繼續執行）：{type(e).__name__}", file=sys.stderr)
     owner = [next(iter(ALLOWED), None)]
     threading.Thread(target=watchdog, args=(lambda: owner[0],), daemon=True).start()
     offset = 0
@@ -135,18 +181,20 @@ def main():
             chat, text = str(msg.get("chat", {}).get("id", "")), (msg.get("text") or "").split("@")[0].strip()
             if not chat:
                 continue
-            if chat not in ALLOWED:
+            if not is_authorized_chat(chat):
                 say(chat, f"你的 chat id 是 {chat}，把它設進 TG_CHAT_ID 才能操作")
                 continue
             owner[0] = chat
-            if text == "/up":
+            if text == "/id":
+                say(chat, f"你的 chat id 是 {chat}")
+            elif text == "/up":
                 threading.Thread(target=do_up, args=(chat,), daemon=True).start()
             elif text == "/down":
                 threading.Thread(target=do_down, args=(chat,), daemon=True).start()
             elif text == "/status":
                 say(chat, f"網址：{panel() or '（沒開）'}\n" + mx("status", timeout=60)[1][-1500:])
             else:
-                say(chat, "指令：/up 開機（G4→A100→L4）、/status、/down")
+                say(chat, "指令：/up 開機（G4→A100→L4）、/status、/down、/id")
 
 
 if __name__ == "__main__":
@@ -155,6 +203,41 @@ if __name__ == "__main__":
         assert activity(None, {"data": [{"id": "a", "status": "done"}]}) == ("a", True)  # 新工作
         assert activity("a", {"data": [{"id": "a", "status": "done"}]}) == ("a", False)  # 沒變化 → 閒置
         assert activity("a", {"data": [{"id": "a", "status": "running"}]}) == ("a", True)  # 還在跑
+        assert [item["command"] for item in COMMANDS] == ["up", "status", "down", "id"]
+        original_allowed, original_access_mode = ALLOWED, TG_ACCESS_MODE
+        try:
+            ALLOWED = {"111", "222"}
+            TG_ACCESS_MODE = ""
+            assert access_config_error() == ""
+            assert is_authorized_chat("111") and not is_authorized_chat("333")
+            TG_ACCESS_MODE = "botfather"
+            assert is_authorized_chat("222") and not is_authorized_chat("333")
+            ALLOWED = set()
+            TG_ACCESS_MODE = ""
+            assert access_config_error() == ""
+            assert is_authorized_chat("telegram-admitted-chat")
+            TG_ACCESS_MODE = "invalid"
+            assert access_config_error()
+            assert not is_authorized_chat("any-chat")
+        finally:
+            ALLOWED, TG_ACCESS_MODE = original_allowed, original_access_mode
+        original_tg, calls = tg, []
+        def fake_tg(method, **params):
+            calls.append(method)
+            if method == "setMyCommands":
+                assert json.loads(params["commands"]) == COMMANDS
+                return True
+            if method == "getMyCommands":
+                return COMMANDS
+            raise AssertionError(f"unexpected Telegram method: {method}")
+        tg = fake_tg
+        try:
+            register_commands()
+        finally:
+            tg = original_tg
+        assert calls == ["setMyCommands", "getMyCommands"]
         print("selftest ok")
+    elif sys.argv[1:] == ["--register-commands"]:
+        register_commands()
     else:
         main()
