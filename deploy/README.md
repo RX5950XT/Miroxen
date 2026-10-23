@@ -198,7 +198,26 @@ mx-colab up ──colab CLI──────────▶ setup.sh：拉程�
 TG_TOKEN=<BotFather 給的 token> TG_CHAT_ID=<你的 chat id> nohup python3 deploy/bot/tg_bot.py > ~/tg_bot.log 2>&1 &
 ```
 
+若只用 BotFather 的允許名單，先在 BotFather 開啟 `Restrict bot usage` 並設定名單；不設定 `TG_CHAT_ID` 時，程式預設就是此模式（不需填數字 ID）：
+
+```bash
+TG_TOKEN=<BotFather 給的 token> nohup python3 deploy/bot/tg_bot.py > ~/tg_bot.log 2>&1 &
+```
+
+存取控制可選兩種方式：
+
+- **程式 ID 白名單**：設定 `TG_CHAT_ID`，多個 ID 用逗號分隔。若 BotFather 的 `Restrict bot usage` 也開啟，兩層都要允許（實際權限是交集）。
+- **只用 BotFather 名單（預設）**：不設 `TG_CHAT_ID` 即可；必須在 BotFather 開啟 `Restrict bot usage` 並設定允許使用者。程式無法讀回或驗證 BotFather 的開關，若關閉此限制，任何能傳訊息的人都可能操作 bot。
+
+若 `TG_CHAT_ID` 與 BotFather 限制同時使用，兩層都要允許；程式實際權限是兩者交集。
+
+bot 啟動時會自動向 Telegram 註冊並讀回驗證 `/up`、`/status`、`/down`、`/id`，指令選單會顯示在聊天輸入框；只想單獨註冊、不啟動 bot 時：
+
+```bash
+TG_TOKEN=<BotFather 給的 token> python3 deploy/bot/tg_bot.py --register-commands
+```
+
 - `/up`：依 `MX_GPUS`（預設 `G4 A100 L4`）逐一 `mx-colab up`，成功就回公開網址；失敗會先 `mx-colab down` 收掉半開的 VM 再試下一張。
 - 每分鐘查公開網址的 `/v1/jobs`：`MX_IDLE_MIN`（預設 30）分鐘內沒有新工作、也沒有排隊／執行中的就自動關機；連續 5 分鐘連不上（VM 被回收）也會關。
-- `/status`、`/down`。不設 `TG_CHAT_ID` 時 bot 只回你的 chat id，其他人傳訊一律不理。
+- `/status`、`/down`、`/id`。未設定 `TG_CHAT_ID` 時，必須明確選擇 BotFather 存取模式；未配置任何存取控制時 bot 不會啟動。
 - bot 跑在本機 WSL，電腦關機或 WSL 結束 bot 就停（VM 不受影響，但不會再自動關機）。
